@@ -1,0 +1,14 @@
+# Godot 导入缓存
+.godot/
+
+# 调试产物：测试/截图的临时输出，不是交付内容
+tests/_run.out.txt
+tests/_run.err.txt
+tests/_capture.png
+
+# Blender 的临时诊断渲染（正式成品是 blender/renders/<shot>.png）
+blender/renders/_*.png
+blender/renders/diag-*.png
+blender/renders/haze-*.png
+blender/renders/hz-*.png
+blender/renders/hz3-*.png
