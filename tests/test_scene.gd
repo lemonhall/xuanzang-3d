@@ -13,15 +13,27 @@ func _ready() -> void:
 	print("=== 西行·玄奘 3D / 场景测试 ===")
 	_test_dune_field()
 	_test_ridge_orientation()
-	_test_water_model()
+	_test_endurance_model()
+	_test_endurance_contract()
+	# 主场景组装放在**最前面**（紧跟在几个纯模型的测试之后）：它要在进程最干净的
+	# 时候建一遍完整的世界。放在末尾时，前面几节拆过好几次重场景（每拆一次
+	# Mirage 就是几千个 MeshInstance3D），实测有约一半概率直接崩在
+	# add_child 上（0xC0000005，连汇总行都来不及打）——那是 headless 下
+	# "拆了又建"的时序问题，不是被测代码的问题。顺序换过来之后连跑 5 次全绿。
+	await _test_main_scene_assembles()
+	_test_gait()
 	_test_storm_model()
 	_test_ground_following()
+	_test_ground_is_big_enough()
+	_test_collapse_timeline()
+	await _test_breath()
+	await _test_hud_meters()
 	_test_mirage_detail()
 	_test_statue_readability()
 	await _test_backlight()
 	await _test_mirage_keeps_distance()
 	await _test_scene_is_outdoors()
-	await _test_main_scene_assembles()
+	await _test_bgm()
 	_report()
 
 
@@ -89,49 +101,249 @@ func _test_ridge_orientation() -> void:
 	)
 
 
-func _test_water_model() -> void:
-	print("[水囊]")
+## 体力模型。**这里没有水囊**：需求方明确划掉了那个概念（"不应该是水囊的概念"），
+## 玩家消耗的是自己的身体，不是壶里的水。
+func _test_endurance_model() -> void:
+	print("[体力]")
 	GameState.reset()
-	check(is_equal_approx(GameState.water, 1.0), "开局水囊是满的")
+	check(is_equal_approx(GameState.stamina, 1.0), "开局体力是满的")
+	check(is_equal_approx(GameState.fatigue(), 0.0), "刚出发时一点都不累")
 
 	GameState.reset()
 	GameState.storm_intensity = 0.0
-	GameState.tick(GameState.FULL_DRAIN_SECONDS * 0.5, 0.0)
-	var half := GameState.water
-	check(half > 0.4 and half < 0.6, "平静走一半时间，水剩约一半（%.2f）" % half)
+	GameState.tick(GameState.ENDURANCE_SECONDS * 0.5, 0.0)
+	var half := GameState.stamina
+	check(half > 0.4 and half < 0.6, "平静走一半时间，体力剩约一半（%.2f）" % half)
 
 	GameState.reset()
 	GameState.storm_intensity = 0.0
-	GameState.tick(GameState.FULL_DRAIN_SECONDS, 0.0)
-	check(GameState.water <= 0.001, "走到见底")
-	check(GameState.is_collapsed, "水尽即倒下")
+	GameState.tick(GameState.ENDURANCE_SECONDS, 0.0)
+	check(GameState.stamina <= 0.001, "走到见底")
+	check(GameState.is_collapsed, "体力耗尽即倒下")
+	check(is_equal_approx(GameState.fatigue(), 1.0), "倒下时是最累的一刻")
 
 	GameState.reset()
 	GameState.storm_intensity = 1.0
 	GameState.tick(60.0, 0.0)
-	var storm_water := GameState.water
+	var storm_stamina := GameState.stamina
 
 	GameState.reset()
 	GameState.storm_intensity = 0.0
 	GameState.tick(60.0, 0.0)
-	var calm_water := GameState.water
-	check(storm_water < calm_water, "沙暴中耗水更快（%.3f < %.3f）" % [storm_water, calm_water])
+	var calm_stamina := GameState.stamina
+	check(
+		storm_stamina < calm_stamina,
+		"沙暴里体力掉得更快（%.3f < %.3f）" % [storm_stamina, calm_stamina]
+	)
 
 	GameState.reset()
 	GameState.storm_intensity = 0.0
 	GameState.tick(60.0, 0.0)
-	var walk_water := GameState.water
+	var walk_stamina := GameState.stamina
 	GameState.reset()
 	GameState.storm_intensity = 0.0
 	GameState.tick(60.0, 1.0)
-	check(GameState.water < walk_water, "冲刺耗水更快")
+	check(GameState.stamina < walk_stamina, "冲刺掉得更快")
 
-	# 倒下之后不再继续扣水
+	# 倒下之后不再继续扣体力
 	GameState.reset()
-	GameState.tick(GameState.FULL_DRAIN_SECONDS * 2.0, 0.0)
-	var dead_water := GameState.water
+	GameState.tick(GameState.ENDURANCE_SECONDS * 2.0, 0.0)
+	var dead_stamina := GameState.stamina
 	GameState.tick(100.0, 1.0)
-	check(is_equal_approx(dead_water, GameState.water), "倒下后水不再变化")
+	check(is_equal_approx(dead_stamina, GameState.stamina), "倒下后体力不再变化")
+	GameState.reset()
+
+
+## 需求方给的是两个数：**"够翻 4 次沙丘"、"走个 3 分钟左右"**。
+## 它们不能只写在注释里当承诺，得是能跑出来的数——所以这条测试把一局走一遍：
+## 拿真实的沙暴相位机推进，玩家一直走，记录倒下的时刻和走过的距离，
+## 再去高度场上数他真正翻过了几道沙脊。
+func _test_endurance_contract() -> void:
+	print("[体力契约：三分钟 / 四道沙丘]")
+	var field := DuneField.new()
+	var walk := 2.6
+	var start := field.find_viewpoint()
+	GameState.reset()
+	var storm := Sandstorm.new()
+
+	var t := 0.0
+	var step := 0.05
+	var x := start.x
+	while not GameState.is_collapsed and t < 900.0:
+		storm.advance(step)
+		GameState.tick(step, 0.0)
+		GameState.add_distance(walk * step)
+		x += walk * step
+		t += step
+
+	var distance := GameState.distance_travelled
+	var crests := _count_crests(field, start.x, x, start.y)
+	var ridges := 4.0 * field.spacing
+	print("  （实测：%.0f s 倒下，走了 %.0f m，翻过 %d 道沙脊）" % [t, distance, crests])
+	check(t > 165.0 and t < 205.0, "一局约三分钟（%.0f s 落在 165~205 s）" % t)
+	check(
+		distance > ridges,
+		"够翻 4 道沙丘的距离（%.0f m > 4 × 间距 %.0f m）" % [distance, ridges]
+	)
+	check(crests >= 4, "真的翻过了 4 道沙脊（实测 %d 道）" % crests)
+	storm.free()
+	GameState.reset()
+
+
+## 数一数从 x0 走到 x1 翻过了几道沙脊。
+##
+## 判据是**局部极大 + 一段显著度**，不是"跨过某个高度阈值"：高度场里还叠着
+## 大尺度的 swell 噪声（±10 m），固定阈值在起伏高低不同的沙丘上会多算或漏算。
+## ±40 m 的窗口比半个周期（95/2 = 47.5 m）窄，所以一道脊只可能被数到一次。
+func _count_crests(field: DuneField, x0: float, x1: float, z: float) -> int:
+	const STEP := 1.0
+	const WINDOW := 40
+	const PROMINENCE := 8.0
+	var samples := PackedFloat32Array()
+	var x := x0
+	while x <= x1 + float(WINDOW) * STEP:
+		samples.append(field.sample(x, z))
+		x += STEP
+	var crests := 0
+	for i in range(1, samples.size() - WINDOW):
+		var h := samples[i]
+		if h <= samples[i - 1] or h < samples[i + 1]:
+			continue
+		var low := h
+		for k in range(maxi(i - WINDOW, 0), mini(i + WINDOW, samples.size() - 1) + 1):
+			low = minf(low, samples[k])
+		if h - low >= PROMINENCE:
+			crests += 1
+	return crests
+
+
+## 步态契约。需求方对上一版的判词是两句：**"左摇右摆的感觉太过了"**、
+## **"摇摆也不够随机，太机械了"**。两句都是能量出来的：
+##
+##   1. "太过" = 幅度。滚转和左右摆各有上限，而且**下陷必须大于左右摆**——
+##      沙地里走路，最先读到的是"每一步踩下去"，不是"左右摇"；
+##   2. "太机械" = 周期性。两条正弦叠出来的步态，同侧两步的幅度必然相等；
+##      真实的步子是一步一个样的。
+##
+## 这里直接驱动 `_update_camera`（而不是靠引擎的物理帧）：步态是纯函数式的
+## 时间推进，脱离帧率单独走一遍，量出来的数才是可复现的。
+func _test_gait() -> void:
+	print("[步态：一脚一步]")
+	var player := Wanderer.new()
+	add_child(player)
+	# 引擎自己的物理帧会按"没有输入"把速度拉回 0，和这里的推进打架。
+	player.set_physics_process(false)
+	GameState.reset()
+	var cam := player.camera()
+	var dt := 1.0 / 60.0
+	var frames := 1200
+	var heights := PackedFloat32Array()
+	var laterals: Array[float] = []
+	var sinks: Array[float] = []
+	var last_index := 0
+	var max_sway := 0.0
+	var max_roll := 0.0
+	for i in range(frames):
+		player._update_camera(dt, player.walk_speed, false)
+		heights.append(cam.position.y)
+		max_sway = maxf(max_sway, absf(cam.position.x))
+		max_roll = maxf(max_roll, absf(cam.rotation.z))
+		if player._step_index != last_index:
+			last_index = player._step_index
+			laterals.append(absf(player._step_lateral))
+			sinks.append(player._step_sink)
+
+	var steps := laterals.size()
+	var sink_min := INF
+	var sink_max := -INF
+	for sink in sinks:
+		sink_min = minf(sink_min, sink)
+		sink_max = maxf(sink_max, sink)
+	var sway_max := 0.0
+	var sway_min := INF
+	for lateral in laterals:
+		sway_max = maxf(sway_max, lateral)
+		sway_min = minf(sway_min, lateral)
+
+	print(
+		"  （%.0f 秒走了 %d 步：下陷 %.3f~%.3f m、左右 %.1f~%.1f cm、滚转峰值 %.2f°、镜头横向峰值 %.1f cm）"
+		% [
+			float(frames) * dt,
+			steps,
+			sink_min,
+			sink_max,
+			sway_min * 100.0,
+			sway_max * 100.0,
+			rad_to_deg(max_roll),
+			max_sway * 100.0,
+		]
+	)
+	check(steps > 30, "真的走了这么多步（%d 步）" % steps)
+	# 1) 幅度
+	check(max_roll <= deg_to_rad(1.5), "滚转收在 1.5° 以内（峰值 %.2f°）" % rad_to_deg(max_roll))
+	check(max_sway <= 0.025, "镜头左右摆收在 2.5 cm 以内（峰值 %.1f cm）" % (max_sway * 100.0))
+	check(
+		sink_min > 0.028 and sink_max < 0.058,
+		"每一步都会陷下去，且深浅有变化（%.1f~%.1f cm）"
+		% [sink_min * 100.0, sink_max * 100.0]
+	)
+	check(
+		sink_max > sway_max * 1.5,
+		"下陷比左右摆明显（%.1f cm vs %.1f cm）——沙地里先读到的是踩下去"
+		% [sink_max * 100.0, sway_max * 100.0]
+	)
+	# 2) 随机（要的是"不机械"，不是"真随机"：同一个哈希，同一条路）
+	check(
+		_stddev(laterals) > 0.002,
+		"左右摆一步一个样，不是两条正弦（同一步幅度的标准差 %.1f mm）"
+		% (_stddev(laterals) * 1000.0)
+	)
+	check(
+		_stddev(sinks) > 0.004,
+		"每步陷的深浅也不一样（标准差 %.1f mm）" % (_stddev(sinks) * 1000.0)
+	)
+	# 3) 一脚一下沉：起伏的频率是**步频**，不是两步一次（正弦版就是两步一次）
+	var dips := _count_dips(heights, int(1.5 / dt))
+	check(
+		dips > steps * 0.85 and dips < steps * 1.4,
+		"上下起伏跟着每一步走（%d 次下沉 / %d 步）——两步一次就是摇，不是走" % [dips, steps]
+	)
+	player.free()
+	GameState.reset()
+
+
+func _stddev(values: Array[float]) -> float:
+	if values.is_empty():
+		return 0.0
+	var sum := 0.0
+	for value in values:
+		sum += value
+	var mean := sum / float(values.size())
+	var acc := 0.0
+	for value in values:
+		acc += (value - mean) * (value - mean)
+	return sqrt(acc / float(values.size()))
+
+
+## 数一数信号里的下沉次数。先减掉 1.5 秒的滑动均值——**喘气是慢的**
+## （0.24 Hz 起步），减掉它之后剩下的基本就只有走路那一层了。
+func _count_dips(values: PackedFloat32Array, window: int) -> int:
+	var slow := PackedFloat32Array()
+	for i in range(values.size()):
+		var from: int = maxi(0, i - window)
+		var to: int = mini(values.size() - 1, i + window)
+		var sum := 0.0
+		for k in range(from, to + 1):
+			sum += values[k]
+		slow.append(sum / float(to - from + 1))
+	var dips := 0
+	for i in range(1, values.size() - 1):
+		var a := values[i] - slow[i]
+		var prev := values[i - 1] - slow[i - 1]
+		var next := values[i + 1] - slow[i + 1]
+		if a < prev and a <= next:
+			dips += 1
+	return dips
 
 
 func _test_storm_model() -> void:
@@ -189,6 +401,227 @@ func _test_ground_following() -> void:
 		"视点高于脚底"
 	)
 	root.queue_free()
+
+
+## 玩家走不出去吗？——把"最坏的一局"真的走一遍，看他能到哪。
+##
+## 需求方的话是"计算好 4-5 个沙丘以及翻越的时间，让'我'走不出去就行了"。
+## 所以这里不假设、不估算：四个最坏组合各跑一遍真实模拟（含沙暴推力），
+## 取最远的落点，要求它离地形边还留着一大段余量——
+## 那段余量同时也要够雾把边藏起来（1 km 处透射 25%）。
+func _test_ground_is_big_enough() -> void:
+	print("[地形够不够大]")
+	var world := DesertWorld.new()
+	var half := world.ground_size * 0.5
+	var cases := {
+		"走·顺风往 +X": _worst_reach(1.0, false),
+		"走·逆风往 -X": _worst_reach(-1.0, false),
+		"冲·顺风往 +X": _worst_reach(1.0, true),
+		"冲·逆风往 -X": _worst_reach(-1.0, true),
+	}
+	var farthest := 0.0
+	for label: String in cases:
+		var reach: float = cases[label]
+		print("  （%s：最远到 x=%.0f m）" % [label, reach])
+		check(reach < half, "%s 仍在场内（%.0f m < 半边长 %.0f m）" % [label, reach, half])
+		farthest = maxf(farthest, reach)
+	check(
+		half - farthest > 900.0,
+		"离最近的边还剩 %.0f m（> 900 m，雾盖得住）" % (half - farthest)
+	)
+	world.free()
+
+
+## 让"最坏的一局"真的跑一遍：出生点摆在**要去的方向的另一端**，
+## 一路上沙暴该推就推，直到倒下。返回全程里离原点最远的那个 |x|（米）。
+##
+## 返回的是**全程最大值**而不是终点：出生点本身离原点就有 400 m，
+## 只看到没到终点，会把"出生就在边上"这种情况漏掉。
+func _worst_reach(direction: float, sprint: bool) -> float:
+	var walk := 2.6
+	var run := 4.4
+	GameState.reset()
+	var storm := Sandstorm.new()
+	# 出生点最坏位置：朝 +X 走就生在 -400，朝 -X 走就生在 +400。
+	var x := -direction * DuneField.VIEWPOINT_SPAN
+	var farthest := absf(x)
+	var t := 0.0
+	var step := 0.05
+	var speed := run if sprint else walk
+	var exertion := 1.0 if sprint else 0.0
+	while not GameState.is_collapsed and t < 900.0:
+		storm.advance(step)
+		GameState.tick(step, exertion)
+		# 沙暴推力和 main 里给玩家的是同一个式子（PEAK_PUSH × intensity）。
+		var push := storm.wind_direction * Sandstorm.PEAK_PUSH * storm.intensity
+		x += (direction * speed + push.x) * step
+		farthest = maxf(farthest, absf(x))
+		t += step
+	storm.free()
+	GameState.reset()
+	return farthest
+
+
+## 倒下之后那条时间线：摔倒 → 喘几口 → 闭眼 → 黑 → 题记。
+##
+## 全部是纯函数（GameState 上的静态映射），所以这条测试不需要场景：
+## 镜头怎么沉、喘气多快、眼睑什么时候合，读的都是同一条曲线上的不同点。
+func _test_collapse_timeline() -> void:
+	print("[倒下之后的时间线]")
+	var fall := GameState.FALL_SECONDS
+	var gasp := GameState.GASP_SECONDS
+	var close := GameState.CLOSE_SECONDS
+
+	check(is_equal_approx(GameState.fall_at(-1.0), 0.0), "没倒下就是站着的")
+	check(is_equal_approx(GameState.fall_at(0.0), 0.0), "倒下那一瞬还没摔下去")
+	check(
+		is_equal_approx(GameState.fall_at(fall), 1.0),
+		"%.1f s 之后摔定（膝盖软 → 侧倒）" % fall
+	)
+	check(
+		GameState.fall_at(fall * 0.5) > 0.6 and GameState.fall_at(fall * 0.5) < 0.85,
+		"摔到一半时进度 %.2f（缓出，不是匀速）" % GameState.fall_at(fall * 0.5)
+	)
+
+	# 闭眼必须**晚于**摔倒 + 那几口粗气：先喘，再合眼。
+	check(is_equal_approx(GameState.eye_close_at(0.0), 0.0), "倒下那一瞬眼睛还睁着")
+	check(is_equal_approx(GameState.eye_close_at(fall), 0.0), "摔倒的过程中还睁着")
+	check(
+		is_equal_approx(GameState.eye_close_at(fall + gasp), 0.0),
+		"喘完那几口才合眼（%.1f s 时还睁着）" % (fall + gasp)
+	)
+	var mid := GameState.eye_close_at(fall + gasp + close * 0.5)
+	check(mid > 0.3 and mid < 0.7, "合到一半时开合度 %.2f" % mid)
+	check(
+		is_equal_approx(GameState.eye_close_at(fall + gasp + close), 1.0),
+		"%.1f s 之后眼睛合上" % (fall + gasp + close)
+	)
+	var monotone := true
+	var prev := -1.0
+	for i in range(400):
+		var v := GameState.eye_close_at(float(i) * 0.05)
+		if v < prev - 0.0001:
+			monotone = false
+		prev = v
+	check(monotone, "眼睑只会越合越紧，不会自己睁开")
+
+	# 呼吸：越累越快越深；倒下之后先急喘，再一路慢下来。
+	check(
+		GameState.pant_rate(1.0, -1.0) < GameState.pant_rate(0.0, -1.0),
+		"越累喘得越快（%.2f → %.2f Hz）"
+		% [GameState.pant_rate(1.0, -1.0), GameState.pant_rate(0.0, -1.0)]
+	)
+	check(
+		GameState.pant_rate(0.0, 0.0) > GameState.pant_rate(0.0, 9.0),
+		"倒下之后先急喘、再慢下来（%.2f → %.2f Hz）"
+		% [GameState.pant_rate(0.0, 0.0), GameState.pant_rate(0.0, 9.0)]
+	)
+	check(
+		GameState.pant_depth(0.0, -1.0) > GameState.pant_depth(1.0, -1.0),
+		"累的时候喘得更深（%.3f → %.3f m）"
+		% [GameState.pant_depth(1.0, -1.0), GameState.pant_depth(0.0, -1.0)]
+	)
+	check(
+		GameState.pant_depth(0.0, 12.0) < GameState.pant_depth(0.0, 0.0),
+		"最后那几口气越来越浅"
+	)
+
+	# 时间线本身要由 tick 推着走（不然闭眼永远停在第一帧）
+	GameState.reset()
+	check(GameState.collapse_elapsed < 0.0, "没倒下时没有倒下计时")
+	GameState.tick(GameState.ENDURANCE_SECONDS * 2.0, 0.0)
+	check(GameState.is_collapsed, "体力耗尽即倒下")
+	check(is_equal_approx(GameState.collapse_elapsed, 0.0), "倒下那一刻计时从 0 起步")
+	GameState.tick(3.0, 0.0)
+	check(GameState.collapse_elapsed > 2.9, "倒下之后时间继续走（%.1f s）" % GameState.collapse_elapsed)
+	GameState.reset()
+
+
+## 喘气的声音层。headless 里没有声卡，听不到声音，但**波形本身**是可以量的：
+## 包络形状、两个方向的亮度、峰值不削顶、有实际能量。
+func _test_breath() -> void:
+	print("[喘气]")
+	check(
+		Breath.envelope_at(0.05) < Breath.envelope_at(0.25),
+		"吸气是渐起的（%.2f → %.2f）" % [Breath.envelope_at(0.05), Breath.envelope_at(0.25)]
+	)
+	check(
+		Breath.envelope_at(0.45) > Breath.envelope_at(0.30),
+		"呼气比吸气响（%.2f > %.2f）——这一声才是粗气"
+		% [Breath.envelope_at(0.45), Breath.envelope_at(0.30)]
+	)
+	check(Breath.envelope_at(0.95) < 0.001, "两次呼吸之间收干净（留出间隙）")
+	var peak := 0.0
+	for i in range(400):
+		peak = maxf(peak, Breath.envelope_at(float(i) / 400.0))
+	check(peak <= 1.0 and peak > 0.9, "包络峰值在 1 以内、也不虚（%.2f）" % peak)
+	check(
+		Breath.inhale_share(0.1) > 0.9 and Breath.inhale_share(0.6) < 0.1,
+		"吸气的声门亮、呼气收紧（滤波器截止跟着相位走）"
+	)
+
+	var breath := Breath.new()
+	add_child(breath)
+	await get_tree().process_frame
+	check(breath.stream != null, "喘气挂上了流")
+	check(breath.playing, "进关就开始喘")
+	var peak_sample := 0.0
+	var energy := 0.0
+	var n := 8192
+	for i in range(n):
+		var v := breath.next_sample(0.6 / Breath.MIX_RATE)
+		peak_sample = maxf(peak_sample, absf(v))
+		energy += v * v
+	var rms := sqrt(energy / float(n))
+	check(peak_sample <= 1.0, "不削顶（峰值 %.2f）" % peak_sample)
+	check(rms > 0.02 and rms < 0.6, "有实际气流能量（RMS %.3f）" % rms)
+	breath.stop()
+	breath.free()
+	check(not is_instance_valid(breath), "喘气节点已析构")
+
+
+## HUD：**不许有水囊，也不许有里程**。
+##
+## 这两条是需求方点名的（"不应该是水囊的概念"、"也不要给玩家显示走了多少米"），
+## 而"界面上没有某个词"这件事只有把文本全捞出来看才算验过——
+## 靠肉眼在截图里找，改代码的人随手加回一行也不会有人发现。
+func _test_hud_meters() -> void:
+	print("[HUD：没有水囊，没有里程]")
+	var hud := Hud.new()
+	add_child(hud)
+	await get_tree().process_frame
+
+	var texts: Array[String] = []
+	_collect_text(hud, texts)
+	var joined := "｜".join(texts)
+	check(not joined.contains("水囊"), "界面上没有水囊（当前：%s）" % joined)
+	check(not joined.contains("米"), "界面上不报米数（当前：%s）" % joined)
+	check(not joined.contains("已行"), "界面上没有里程（当前：%s）" % joined)
+	check(joined.contains("体力"), "掉的是体力（当前：%s）" % joined)
+
+	var bars: Array[ProgressBar] = []
+	_collect_bars(hud, bars)
+	check(bars.size() == 1, "只有一条体力条（%d 条）" % bars.size())
+	if bars.size() == 1:
+		check(not bars[0].show_percentage, "条上不带百分比——不报数字才是这一版的要求")
+
+	hud.free()
+
+
+func _collect_text(node: Node, out: Array[String]) -> void:
+	var label := node as Label
+	if label != null and not label.text.is_empty():
+		out.append(label.text)
+	for child in node.get_children():
+		_collect_text(child, out)
+
+
+func _collect_bars(node: Node, out: Array[ProgressBar]) -> void:
+	var bar := node as ProgressBar
+	if bar != null:
+		out.append(bar)
+	for child in node.get_children():
+		_collect_bars(child, out)
 
 
 func _test_mirage_detail() -> void:
@@ -579,19 +1012,28 @@ func _test_scene_is_outdoors() -> void:
 	var half_v := cam.fov * 0.5
 	var half_h := rad_to_deg(atan(tan(deg_to_rad(half_v)) * cam.get_viewport().get_visible_rect().size.aspect()))
 
-	# 1) 横向量不出来：正面城墙的角楼必须在半水平视角之外
-	var corner := Vector3(
-		origin.x - Mirage.CITY_HALF,
-		origin.y + Mirage.WALL_H,
-		origin.z + Mirage.CITY_HALF
-	)
-	var corner_azimuth := rad_to_deg(
-		atan2(absf(corner.z - eye.z), corner.x - eye.x)
-	)
-	check(
-		corner_azimuth > half_h,
-		"城墙两端切出画外（角楼方位 %.0f° > 半视角 %.0f°）" % [corner_azimuth, half_h]
-	)
+	# 1) 横向量不出来：正面城墙的角楼必须在半水平视角之外。
+	#
+	# **两端都要查**，而且两端的 z 不一样：城郭整体右移了 CITY_SIDE（让开被
+	# 弥勒像挡住的那根轴线，见 Mirage.CITY_SIDE），于是它是**不对称**的——
+	#   左端 = CITY_LEFT_END（钉死不动，它才是"量不出来"的那条线）
+	#   右端 = CITY_SIDE + CITY_HALF（跟着城一起往右长）
+	# 只查一头的话，把 CITY_SIDE 往左调就会悄悄放左端进画面，而测试还是绿的。
+	var corners := {
+		"左端": Vector3(origin.x - Mirage.CITY_HALF, origin.y + Mirage.WALL_H, origin.z + Mirage.CITY_LEFT_END),
+		"右端": Vector3(
+			origin.x - Mirage.CITY_HALF,
+			origin.y + Mirage.WALL_H,
+			origin.z + Mirage.CITY_SIDE + Mirage.CITY_HALF
+		),
+	}
+	for label: String in corners:
+		var corner: Vector3 = corners[label]
+		var corner_azimuth := rad_to_deg(atan2(absf(corner.z - eye.z), corner.x - eye.x))
+		check(
+			corner_azimuth > half_h,
+			"城墙%s切出画外（角楼方位 %.0f° > 半视角 %.0f°）" % [label, corner_azimuth, half_h]
+		)
 
 	# 2) 抬头有顶：全场最高点是弥勒的举身光尖——它必须**够得着**。
 	#
@@ -648,13 +1090,70 @@ func _test_scene_is_outdoors() -> void:
 	var tower_top := Vector3(
 		origin.x - Mirage.CITY_HALF + Mirage.TOWER_BEHIND_WALL,
 		origin.y + Mirage.TOTAL_HEIGHT,
-		origin.z
+		origin.z + Mirage.CITY_SIDE
 	)
 	var tower_elev := _elevation(eye, tower_top)
 	check(
 		tower_elev < head_elev,
 		"主塔低于弥勒（%.1f° < %.1f°）——巨物要有唯一的顶点" % [tower_elev, head_elev]
 	)
+
+	# 4) **佛塔不能让佛挡住**（需求方 2026-09-24 的红框截图）。
+	#
+	# 弥勒像站在城墙之前 480 m、横向偏到玩家左手边，从玩家看过去它占了画面
+	# 左半边；城郭原来的中轴在方位 0°，主塔和城门楼正好**贴着像的右缘**立
+	# 起来，被挡掉一半。修法是把城整体右移 CITY_SIDE——不是把像挪走（像一动，
+	# 逆光的太阳也得跟着动，那张构图是定下来的）。
+	#
+	# 这条断言把"让开多少"变成可量的数：地标的最左缘必须比像的剪影右缘再往
+	# 右 CITY_CLEARANCE_DEG 度。**像的右缘必须按画面上看得见的那一段量**，
+	# 不能用包围盒：像身最宽处在 0.55h 的举臂那一层，而它已经在画面上沿之外，
+	# 用包围盒会量出 +31°，把整座城都逼出画面。
+	var statue := mirage.get_node_or_null("Statue") as MeshInstance3D
+	if statue == null:
+		check(false, "像身缺失，验不了“佛塔不能被佛挡住”")
+	else:
+		var scale := Mirage.statue_scale
+		var flat := Vector2(statue_x - eye.x, statue_z - eye.z).length()
+		var band_top := eye.y + flat * tan(deg_to_rad(half_v))
+		var verts: PackedVector3Array = statue.mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+		var statue_right := -INF
+		for v: Vector3 in verts:
+			if origin.y + v.y * scale - Mirage.statue_sink() > band_top:
+				continue
+			statue_right = maxf(statue_right, statue_z + v.z * scale)
+		var statue_right_az := rad_to_deg(atan2(statue_right - eye.z, statue_x - eye.x))
+		# 两个地标都量：主塔（最靠左、也最高）和城门楼（最近、第一个认得出的
+		# 建筑）。各自的"左缘"= 中心方位减去自身半宽。
+		var marks := {
+			"主塔": Vector3(
+				tower_top.x,
+				0.0,
+				origin.z
+				+ Mirage.CITY_SIDE
+				- Mirage.TIER_WIDTHS[0] * Mirage.TOWER_SCALE * 0.5
+			),
+			"城门楼": Vector3(
+				origin.x - Mirage.CITY_HALF,
+				0.0,
+				origin.z + Mirage.CITY_SIDE - Mirage.GATE_HEIGHT * 0.46 * 0.5
+			),
+		}
+		for label: String in marks:
+			var mark: Vector3 = marks[label]
+			var left_az := rad_to_deg(atan2(mark.z - eye.z, mark.x - eye.x))
+			check(
+				left_az - statue_right_az >= Mirage.CITY_CLEARANCE_DEG,
+				"%s的左边没被弥勒挡住（让出 %.1f° ≥ %.0f°：%s左缘 %.1f° vs 像右缘 %.1f°）"
+				% [
+					label,
+					left_az - statue_right_az,
+					Mirage.CITY_CLEARANCE_DEG,
+					label,
+					left_az,
+					statue_right_az
+				]
+			)
 
 	# 天空：天顶不能是暗的。暗天顶 + 亮地平线 == 室内被地灯照亮的天花板。
 	var env_node := instance.get_node_or_null("Desert/WorldEnvironment")
@@ -689,6 +1188,48 @@ func _test_scene_is_outdoors() -> void:
 	instance.queue_free()
 
 
+func _test_bgm() -> void:
+	print("[背景音乐]")
+	check(ResourceLoader.exists(Bgm.TRACK_PATH), "BGM 文件在库里")
+	var track: AudioStreamMP3 = load(Bgm.TRACK_PATH) as AudioStreamMP3
+	check(track != null, "BGM 能作为 AudioStreamMP3 载入")
+	if track == null:
+		return
+	# 74 s 是 ffprobe 量出来的时长。断言写成一个区间：
+	# 既挡住"文件是空的"，也挡住"哪天误换了另一段几秒的音频"。
+	var length := track.get_length()
+	check(
+		length > 60.0 and length < 90.0,
+		"曲子长度 %.1f s 落在剪辑版应有的区间（60~90 s）" % length
+	)
+
+	var music := Bgm.new()
+	add_child(music)
+	await get_tree().process_frame
+	check(music.stream != null, "BGM 节点挂上了流")
+	check(track.loop, "整曲循环（开在 .import 的 loop=true 里）")
+	check(music.playing, "进关即播")
+	check(
+		is_equal_approx(music.volume_db, Bgm.VOLUME_DB),
+		"音量就是基准（%.1f dB）" % music.volume_db
+	)
+	music.stop()
+	check(not music.playing, "stop() 之后不再出声")
+	# queue_free() + 等一帧，而不是当场 free()。这条断言的目的是"节点真的没了"，
+	# 不是"它消失得有多年内"——而当场拆一枚刚停下的播放器，音频那一侧未必已经
+	# 把播放实例收回去。一帧的代价，换确定的收尾。
+	music.queue_free()
+	await get_tree().process_frame
+	check(not is_instance_valid(music), "BGM 节点已析构")
+	#
+	# 已知噪声（不是失败原因）：headless 退出时 Godot 会报
+	#   WARNING: 2 ObjectDB instances were leaked at exit
+	#   ERROR: 1 resources still in use at exit
+	# 指的是这枚 AudioStreamMP3 和它的 playback。最小复现是**不跑任何测试、
+	# 只跑 scenes/main.tscn** 也一样报，多等 10 秒也不消失——那是音频服务在
+	# 没有音频设备时的收尾行为，和这一关的代码无关。判定仍看 ALL TESTS PASSED。
+
+
 func _elevation(from: Vector3, to: Vector3) -> float:
 	return rad_to_deg(atan2(to.y - from.y, Vector2(to.x - from.x, to.z - from.z).length()))
 
@@ -703,6 +1244,10 @@ func _test_main_scene_assembles() -> void:
 	if scene == null:
 		return
 
+	# 再空三帧：这套测试拆过重场景又马上建新的，headless 下偶尔会崩在原生层。
+	# 一帧不够（实测只把崩溃率从 ~50% 压到 ~20%），三帧干净。
+	for i in range(3):
+		await get_tree().process_frame
 	var instance: Node = scene.instantiate()
 	add_child(instance)
 	# 地形是程序化生成的，给它一帧把 _ready 跑完
@@ -712,14 +1257,30 @@ func _test_main_scene_assembles() -> void:
 	check(instance.get("player") != null, "行者已建")
 	check(instance.get("storm") != null, "沙暴系统已建")
 	check(instance.get("hud") != null, "HUD 已建")
+	check(instance.get("bgm") != null, "BGM 已建")
+	check(instance.get("breath") != null, "喘气层已建")
 	var world: Node = instance.get("world")
 	check(world != null and world.get("dune") != null, "高度场已就绪")
-	instance.queue_free()
+	# 临终那只手挂在相机上。它平时是隐藏的，但**必须已经建好**——
+	# 建在"倒下那一刻"是来不及的：那正是画面最不能卡的一帧。
+	var player: Node = instance.get("player")
+	var hand: Node = player.call("hand") if player != null else null
+	check(hand != null, "右手已经挂在相机上")
+	check(hand != null and not hand.visible, "平时藏着（只在倒下之后伸出来）")
+	# 同上：带着 BGM 的场景必须立刻拆干净，不能留给帧末的延迟删除队列。
+	instance.free()
 
 
 # ---------------------------------------------------------------------------
 
 
+## 汇总。
+##
+## ⚠️ **要看到这两行，请用 TTY 跑**（本仓库的 `--headless ... | Select-String`
+## 会把 stdout 变成管道，Windows 版 Godot 在这个组合下退出时会丢尾、exit code
+## 变成 0xC0000005）。曾在 `quit()` 前加 `await process_frame` 试过，
+## 反而变成每次都崩。结论：**读测试结果要么走 TTY，要么看退出码**，
+## 别把"缺汇总"当成"没跑完"。
 func _report() -> void:
 	print("")
 	if _failures.is_empty():

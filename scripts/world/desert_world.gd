@@ -6,12 +6,30 @@ extends Node3D
 ## 全部由代码建出来，没有 .tscn 里手拉的节点，也没有外部素材。
 ## 参数与 Blender 端一一对应，改一处两边能互相印证。
 
-## 地形边长（米）。玩家步行速度约 2.6 m/s，水囊在 190 s 见底，能走约 500 m。
-## 2048 m 是"地平线之外还有地平线"的下限：1024 m 时走到 500 m 就能看见
-## 地形边缘那条硬边，而幻影在 1.4 km 外，两者摆在一起会立刻穿帮。
-@export var ground_size := 2048.0
-## 每边分段数。384 段 = 5.3 m 网格，对 95 m 间距的沙丘仍有 18 个采样点/周期。
-@export var ground_segments := 384
+## 地形边长（米）。**这个数字是算出来的，不是拍的。**
+##
+## 需求方 2026-09-24 把话说明白了："倒也不必无限沙漠，就计算好 4-5 个沙丘、
+## 以及翻越的时间，让'我'走不出去就行了。"——所以这里不做无限地形，
+## 只把"走不出去"这件事算清楚：
+##
+##   一局能走多远   体力基准 195 s，实际结算约 175 s；步速 2.6 m/s → 450 m 上下。
+##                  顺风时沙暴额外推（PEAK_PUSH × 风向的 x 分量，最多 2.45 m/s），
+##                  所以最坏是"顺风走满一局"：约 600 m。
+##   出生点能有多偏  find_viewpoint 在 ±VIEWPOINT_SPAN（400 m）里挑。
+##   于是           |最远到达| ≤ 400 + 600 = 1000 m。
+##
+## 4096（半边长 2048）留了一倍余量：**离最近的边至少还有 1000 m**。
+## 而深度雾在 1 km 处只剩 25% 的透射、2 km 处 6%——这个边既走不到，也看不见。
+## 也就是说"绵延不断"不需要无限地形，一块 4 km 见方的沙丘就够了，
+## 而且比铺 25 块便宜得多。上面那两个数由 tests 里的 [地形够不够大] 实测。
+##
+## 网格 8 m（512 段），上一版是 5.33 m（384 段）。可以粗一档的原因：沙丘剖面
+## 是 pow(cos, 3.4)，**脊顶和谷底都是平的**，最陡处才在腰上——8 m 步长在最陡
+## 那一点的插值误差约 0.2 m（30 m 高的沙丘），画面上看不出来。
+## 顶点 263k、三角形 525k，和上一版同一量级。
+@export var ground_size := 4096.0
+## 每边分段数。
+@export var ground_segments := 512
 
 @export_group("太阳")
 ## 低角度是关键：太阳越高，沙丘越平，影子越短，画面越像儿童插画。
@@ -41,10 +59,11 @@ extends Node3D
 
 var dune: DuneField
 
-var _terrain: MeshInstance3D
 var _environment: Environment
 var _sun: DirectionalLight3D
 var _sky_material: ShaderMaterial
+var _terrain: MeshInstance3D
+var _sand_mat: StandardMaterial3D
 
 
 func _ready() -> void:
@@ -130,6 +149,8 @@ func _build_terrain() -> void:
 			verts[idx] = Vector3(x, heights[idx], z)
 			uvs[idx] = Vector2(x * 0.25, z * 0.25)
 
+			# 边上一圈用单边差分（夹到自己的邻居）——那里离玩家 2 km、
+			# 早被雾吃掉，不值得为它多采一遍高度。
 			var hl := heights[j * n + maxi(i - 1, 0)]
 			var hr := heights[j * n + mini(i + 1, n - 1)]
 			var hd := heights[maxi(j - 1, 0) * n + i]
@@ -171,6 +192,8 @@ func _build_terrain() -> void:
 
 
 func _sand_material() -> StandardMaterial3D:
+	if _sand_mat != null:
+		return _sand_mat
 	var mat := StandardMaterial3D.new()
 	mat.albedo_color = Color(0.80, 0.58, 0.34)
 	mat.roughness = 0.95
@@ -201,6 +224,7 @@ func _sand_material() -> StandardMaterial3D:
 	mat.normal_scale = 1.4
 	# 顶点 UV 是 x*0.25，再乘 4 → 约 1 m 一个风纹周期
 	mat.uv1_scale = Vector3(4.0, 4.0, 1.0)
+	_sand_mat = mat
 	return mat
 
 

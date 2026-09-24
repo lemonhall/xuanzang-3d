@@ -4,12 +4,17 @@ extends Node
 ## 等场景稳定后存 PNG 再退出。窗口只会出现两三秒。
 ##
 ## 用法：
-##   godot --path . tools/capture.tscn -- --out D:\shot.png --frames 130 [--storm] [--thirsty]
+##   godot --path . tools/capture.tscn -- --out D:\shot.png --frames 130 [--storm] [--tired]
 ##       [--pitch 40] [--yaw 90]
 ##       [--statue-scale 10] [--statue-dist 1300] [--statue-probe]
+##       [--collapsed 6.5] [--player-x 3000]
 ##
 ## `--pitch` / `--yaw` 是视角探针：抬头、转身各拍一张，用来判断"看到的天空
 ## 到底是什么形状"。默认（都不给）就是开局那个水平正前方的机位。
+##
+## `--walk <米/秒>` 让行者真的走起来。**走路那一身晃（每一脚的下陷、左右摆、
+## 滚转）只在移动时才存在**——站着拍，每一格都是同一个姿势，
+## 而"走路时左摇右摆太过"这种毛病恰恰只在走动里看得出来。
 ##
 ## `--statue-scale` 覆盖弥勒像的倍率（城郭不动）。**不填就跟随设计态**，
 ## 当前设计态是 4 倍（见 Mirage.statue_scale 的注释）。`--statue-dist`
@@ -32,6 +37,21 @@ var _statue_scale := Mirage.statue_scale
 var _statue_dist := INF
 ## 沙暴探针 / 素材质探针：解析阶段记下来，场景有了再应用。
 var _force_storm := false
+## 体力探针（--tired）。**必须在每一帧写**，不能在 _ready 里写一次：
+## main 的 _ready 会调 GameState.reset()，把体力恢复成满的——上一版就是
+## 这么静默失效的，`--tired` 拍出来和开局一模一样（连 strength 都是 0.57）。
+var _tired_probe := false
+## 倒下之后第几秒（秒）。>=0 就把这一局的体力直接打到 0、并把倒下之后的时间
+## 钉在这一刻上，用来拍"摔倒 / 伸手 / 闭眼"这几格。不填 = 站着。
+var _collapse_probe := -1.0
+## 把玩家沿 +X 挪多远（米）。用来验证"沙漠没有边"。
+var _player_x := 0.0
+## 走路探针：让行者以这个速度一直向前。0 = 站着（默认）。
+##
+## 这里不碰 Wanderer 的输入逻辑，只是每帧把 velocity 写回去——行者自己的
+## _physics_process 会把它朝"没有输入"的方向拉，所以必须每帧重写一次
+## （和 _apply_hold 同一个道理）。
+var _walk_speed := 0.0
 var _mirage_debug := false
 var _statue_debug := false
 ## 幻影被"按住"的世界坐标（Vector3.INF 表示不按住）。
@@ -67,6 +87,26 @@ func _ready() -> void:
 	# process_priority 越大越晚跑，main 是默认的 0。
 	process_priority = 100
 	_aim()
+	print(
+		"DIAG aim yaw=%.1f deg pitch=%.1f deg"
+		% [rad_to_deg(-PI * 0.5) + _yaw_offset_deg, _pitch_deg]
+	)
+	# 探针场景**不接受输入**。不关掉的话，桌面上的鼠标事件会把行者的
+	# _yaw / _pitch 改掉——同一组参数两次拍出来构图完全不一样，
+	# 而"截图对不上"是最难查的那类问题（2026-09-24 实测踩到）。
+	var pawn: Node = _main.get("player")
+	if pawn != null:
+		pawn.set_process_unhandled_input(false)
+	if _player_x != 0.0:
+		# 沿 +X 挪出去，验"这块沙漠够不够大、还有没有边"。地形是一整块，
+		# 挪过去不用等任何东西，第一帧就该是完整的沙丘。
+		var body := pawn as Node3D
+		if body != null:
+			body.global_position += Vector3(_player_x, 0.0, 0.0)
+	if _collapse_probe >= 0.0:
+		GameState.stamina = 0.0
+		GameState.is_collapsed = true
+		GameState.collapse_elapsed = _collapse_probe
 	if not is_inf(_statue_dist):
 		# 按住之后 main 不再把幻影贴地形，脚底会浮在 y=0 上。这里手动取一次
 		# 地面高度补回来——不然"像浮在沙面上/埋进沙丘里"会被误读成构图问题。
@@ -81,7 +121,7 @@ func _ready() -> void:
 			storm.set("_phase", 2)
 			storm.set("_timer", 0.0)
 			storm.force_intensity(0.95)
-		GameState.water = 0.18
+		GameState.stamina = 0.18
 	if _mirage_debug:
 		_swap_mirage_material()
 	if _statue_debug:
@@ -97,6 +137,11 @@ func _process(_delta: float) -> void:
 	if not _capturing:
 		return
 	_apply_hold()
+	_pin_collapse()
+	_pin_stamina()
+	# 朝向每帧重设：参数说了算，鼠标说了不算（见 _aim 的注释）。
+	_aim()
+	_drive_walk()
 	_frames_done += 1
 	if _frames_done < _frames_needed:
 		return
@@ -107,6 +152,30 @@ func _process(_delta: float) -> void:
 	_save_and_quit()
 
 
+## 把"倒下之后第几秒"钉住。
+##
+## main 的 _process 每帧都在推进 `collapse_elapsed`（那是倒下之后的时间线），
+## 不钉住的话，--frames 110 = 1.8 秒里镜头会自己往前走一段，
+## 同一组参数两次拍出来的就不是同一格。探针要的是**定格**。
+func _pin_collapse() -> void:
+	if _collapse_probe < 0.0:
+		return
+	GameState.is_collapsed = true
+	GameState.stamina = 0.0
+	GameState.collapse_elapsed = _collapse_probe
+
+
+## 把体力钉在低位，让幻影**变实**（天还是晴的，能看清城的细节）。
+##
+## GameState.tick() 每帧都在恢复体力，所以这里也得每帧写回去；写成一次性的
+## 初始化代码，`--tired` 会静默变成"和开局一样"（见 _tired_probe 的注释）。
+func _pin_stamina() -> void:
+	if not _tired_probe:
+		return
+	# stamina 是**比例**（0 空 / 1 满），不是秒数——别拿 ENDURANCE_SECONDS 去乘。
+	GameState.stamina = 0.06
+
+
 ## 每帧把幻影按回探针指定处。main._update_mirage 每帧都会覆盖它，
 ## 所以重设也必须是每帧一次——一次性赋值活不过一帧。
 func _apply_hold() -> void:
@@ -115,6 +184,21 @@ func _apply_hold() -> void:
 	var mirage: Node3D = _main.get("mirage")
 	if mirage != null:
 		mirage.global_position = _hold_position
+
+
+## 走路探针：把行者按给定速度推着走。倒下之后不推（人已经不走了）。
+func _drive_walk() -> void:
+	if _walk_speed <= 0.0 or GameState.is_collapsed:
+		return
+	var player: Node = _main.get("player")
+	var body := player as CharacterBody3D
+	if body == null:
+		return
+	var forward := -body.global_transform.basis.z
+	forward.y = 0.0
+	if forward.length() < 0.001:
+		return
+	body.velocity = forward.normalized() * _walk_speed
 
 
 ## 存图并退出。
@@ -138,9 +222,15 @@ func _parse_args() -> void:
 			_frames_needed = int(args[i + 1])
 		elif args[i] == "--storm":
 			_force_storm = true
-		elif args[i] == "--thirsty":
-			# 只把水囊压到低位：幻影会变实，但天是晴的，能看清细节
-			GameState.water = 0.06
+		elif args[i] == "--tired":
+			# 只把体力压到低位：幻影会变实，但天是晴的，能看清细节
+			_tired_probe = true
+		elif args[i] == "--collapsed" and i + 1 < args.size():
+			_collapse_probe = float(args[i + 1])
+		elif args[i] == "--player-x" and i + 1 < args.size():
+			_player_x = float(args[i + 1])
+		elif args[i] == "--walk" and i + 1 < args.size():
+			_walk_speed = float(args[i + 1])
 		elif args[i] == "--mirage-debug":
 			# 换成最朴素的不透明品红材质，绕开自定义 shader：
 			# 如果这样能看见，就是 shader 的问题；还看不见，就是 mesh 或节点的问题。
@@ -185,26 +275,29 @@ func _statue_hold_position(dist: float) -> Vector3:
 	)
 
 ## 把玩家摆到探针指定的朝向。开局朝向是 main.gd 里的 START_YAW，
-## 这里给的是**相对值**，所以不填就是原样。
+## 这里给的是**相对值**，不填就是"开局那个水平正前方的机位"。
+##
+## **每帧都要摆**（`_process` 里调）。只在启动时摆一次是不够的：
+## 之后任何一次鼠标移动都会改掉行者的 _pitch，构图整个变样。
+## 截图工具的第一条契约是"同样的参数拍出同样的图"，所以朝向由这里说了算。
 func _aim() -> void:
-	if is_zero_approx(_yaw_offset_deg) and is_zero_approx(_pitch_deg):
-		return
 	var player: Node = _main.get("player")
 	if player == null:
 		print("DIAG: player missing, cannot aim")
 		return
+	# 倒下之后**不许插手**：那时候的朝向是身体自己算的（头慢慢转向佛），
+	# 探针一覆盖，"临终那一格"就永远拍不到了。这一格必须和游戏里一模一样。
+	if _collapse_probe >= 0.0:
+		return
 	# 与 main.gd 的 START_YAW 一致：绕 Y 轴 -90° 时视线指向 +X。
-	var base := -PI * 0.5
-	player.set("_yaw", base + deg_to_rad(_yaw_offset_deg))
-	player.set("_pitch", deg_to_rad(_pitch_deg))
-	player.set("rotation", Vector3(0.0, base + deg_to_rad(_yaw_offset_deg), 0.0))
+	var yaw := -PI * 0.5 + deg_to_rad(_yaw_offset_deg)
+	var pitch := deg_to_rad(_pitch_deg)
+	player.set("_yaw", yaw)
+	player.set("_pitch", pitch)
+	player.set("rotation", Vector3(0.0, yaw, 0.0))
 	var cam: Camera3D = player.call("camera")
 	if cam != null:
-		cam.rotation.x = deg_to_rad(_pitch_deg)
-	print(
-		"DIAG aim yaw=%.1f deg pitch=%.1f deg"
-		% [rad_to_deg(base) + _yaw_offset_deg, _pitch_deg]
-	)
+		cam.rotation.x = pitch
 
 
 ## 幻影"看不见"的时候，靠猜是没用的——把它的可见性、世界位置、
@@ -283,9 +376,25 @@ func _diagnose_landmarks(cam: Camera3D, mirage: Node3D) -> void:
 	var tower_x := o.x + Mirage.TOWER_BEHIND_WALL - Mirage.CITY_HALF
 
 	var points := {
-		"城墙顶": Vector3(o.x - Mirage.CITY_HALF, o.y + Mirage.WALL_H, o.z),
-		"城门楼顶": Vector3(o.x - Mirage.CITY_HALF, o.y + Mirage.GATE_HEIGHT, o.z),
-		"主塔顶": Vector3(tower_x, o.y + Mirage.TOTAL_HEIGHT, o.z),
+		# 城郭整体右移 CITY_SIDE（让开被弥勒像挡住的那根轴线，见 Mirage.CITY_SIDE）。
+		# 城里的点一律带上这个偏移，不然诊断报的方位比画面上看到的偏左 800 m。
+		"城墙顶": Vector3(o.x - Mirage.CITY_HALF, o.y + Mirage.WALL_H, o.z + Mirage.CITY_SIDE),
+		"城门楼顶": Vector3(
+			o.x - Mirage.CITY_HALF, o.y + Mirage.GATE_HEIGHT, o.z + Mirage.CITY_SIDE
+		),
+		"主塔顶": Vector3(tower_x, o.y + Mirage.TOTAL_HEIGHT, o.z + Mirage.CITY_SIDE),
+		# "佛塔有没有被佛挡住"这一条只能靠两个边缘量：塔的最左缘 vs 像的最右缘。
+		# 像的右缘取肩半宽（0.152h）——白膜在**画面看得见的那一段**（0~0.3h）
+		# 最右到 0.156h，两者差 4 m，够用；用整个包围盒会得到 0.35h（那是
+		# 画面上沿之外的举臂），把整座城都逼出画面。
+		"主塔左缘": Vector3(
+			tower_x,
+			o.y + Mirage.TOTAL_HEIGHT * 0.5,
+			o.z + Mirage.CITY_SIDE - Mirage.TIER_WIDTHS[0] * Mirage.TOWER_SCALE * 0.5
+		),
+		"弥勒右缘": Vector3(
+			statue_x, o.y + Mirage.STATUE_HEIGHT * 0.2, statue_z + Mirage.statue_height() * Mirage.STATUE_SHOULDER_RATIO
+		),
 		# 像的高度一律走 statue_top_y()：它已经扣掉埋进沙里的台座。
 		# 直接写 STATUE_HEIGHT 会把那 16% 的展台又算进去，量出来的仰角
 		# 比画面上看到的偏高——这正是上一轮"诊断说头在画面里、

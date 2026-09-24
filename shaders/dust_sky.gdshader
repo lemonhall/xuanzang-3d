@@ -88,14 +88,28 @@ void sky() {
 	vec3 col = mix(horizon_color, zenith_color, t);
 
 	// 风驱沙尘：沿风向拉长的条纹，越靠地平线越浓，天顶基本干净。
-	// 只取水平分量做 uv（不做透视除法），所以地平线附近不会炸。
-	float dust_band = 1.0 - smoothstep(0.05, 0.60, h);
+	//
+	// 2026-09-24 改过一次，教训记在这儿：旧版的 uv 只有 `level_dir` 两个分量，
+	// 而 `level_dir` 里**没有高度**——同一个方位上，从地平线到天顶是同一个
+	// 噪声值，于是"带"全是笔直的，只有浓度随高度渐变。笔直 = 没有沙的灵动感。
+	// 现在把高度放进 uv 的第二轴（带本身的走向），再用一层低频噪声把相位
+	// 推弯、拿时间让它飘：带就一边弯一边走。
+	//
+	// 仍然**不做透视除法**（dir.xz / dir.y）——地平线附近 uv 冲到无穷，
+	// 天上会浮出三角分面。这里用的是 h = sin(俯仰)，天生有界。
+	float dust_band = 1.0 - smoothstep(0.03, 0.70, h);
 	if (cloud_amount > 0.0) {
-		vec2 stretched = vec2(
-			dot(level_dir, wind), dot(level_dir, vec2(-wind.y, wind.x)) * 2.6
-		);
-		float dust = (_fbm(stretched * cloud_scale) - 0.5) * cloud_amount * dust_band;
-		col *= clamp(1.0 + dust * 1.8, 0.55, 1.60);
+		vec2 uv = vec2(dot(level_dir, wind), h * 2.6);
+		// 相位弯曲：一条低频慢噪声推着带上下起伏，S 形就是从这里来的
+		float wob = _fbm(vec2(uv.x * 0.55 + TIME * 0.008, TIME * 0.003)) - 0.5;
+		uv.y += wob * 2.2;
+		// 漂移：顺风走 + 缓缓上浮。两个速度取得不一样，层次才出得来
+		uv += vec2(TIME * 0.012, -TIME * 0.020);
+		// 一细一粗两层：细的抽成丝，粗的是整片沙幕
+		float fine = _fbm(uv * cloud_scale * 0.34);
+		float broad = _fbm(uv * cloud_scale * 0.10 + vec2(TIME * 0.004, 0.0));
+		float dust = ((fine - 0.5) * 0.8 + (broad - 0.5) * 0.6) * cloud_amount * dust_band;
+		col *= clamp(1.0 + dust * 1.7, 0.58, 1.55);
 	}
 
 	// 方位明暗：朝阳一侧暖亮、背阳一侧冷暗。这一条是"天空"和"穹顶"的分界。

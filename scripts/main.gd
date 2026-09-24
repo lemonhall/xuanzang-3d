@@ -15,6 +15,8 @@ var storm: Sandstorm
 var hud: Hud
 var post: PostProcess
 var mirage: Mirage
+var bgm: Bgm
+var breath: Breath
 
 ## 幻影的**正面城墙**保持在玩家前方 MIRAGE_FRONT_WALL 米处——**它走不近**。
 ##
@@ -124,6 +126,16 @@ func _ready() -> void:
 	hud.name = "Hud"
 	add_child(hud)
 
+	# 声音最后进来，纯粹是个顺序：它不依赖上面任何一个系统。
+	bgm = Bgm.new()
+	bgm.name = "Bgm"
+	add_child(bgm)
+	# 喘气挨着 BGM 放：它和音乐一样是"一直在响"的层，不参与任何关卡逻辑，
+	# 只管把 GameState 里的累翻译成耳朵听得见的东西。
+	breath = Breath.new()
+	breath.name = "Breath"
+	add_child(breath)
+
 
 func _process(delta: float) -> void:
 	if player == null:
@@ -131,10 +143,54 @@ func _process(delta: float) -> void:
 	var exertion := clampf(player.horizontal_speed() / player.sprint_speed, 0.0, 1.0)
 	GameState.tick(delta, exertion)
 	GameState.add_distance(player.horizontal_speed() * delta)
+	# 临终那一眼和那只手要指的那个点：佛的胸怀。玩家这边只认一个世界坐标，
+	# 不认 Mirage——所以幻影挪了、像身换了，这边一行都不用改。
+	player.focus_point = mirage.statue_focus_point()
 	if post != null and storm != null:
 		post.set_storm(storm.intensity)
+		# 沙尘要长在空气里，不在镜头上：后处理每帧都要知道相机朝哪、太阳在哪、
+		# 风往哪吹。三个都从别处已有的来源取，不在这里另算一份。
+		post.set_view(player.camera())
+		post.set_wind(storm.wind_direction)
+	if post != null and world != null:
+		post.set_sun(world.sun_direction())
+	if post != null:
+		post.set_eye_close(GameState.eye_close_at(GameState.collapse_elapsed))
+	if hud != null:
+		hud.set_body_visible(not GameState.is_collapsed)
+		hud.set_epilogue(GameState.collapse_elapsed >= GameState.EPILOGUE_SECONDS)
 	_time += delta
 	_update_mirage(delta)
+	_watch_restart()
+
+
+## 倒下十几秒之后按 R 重走一次。
+##
+## 为什么不 reload 场景：capture / record 工具是把 main.tscn 挂在自己下面的，
+## `reload_current_scene()` 会去重载**工具**那个场景，把工具自己的状态全冲掉。
+## 复位该复位的三样（账、天气、人）比拆了重建便宜，也不会打死别人的引用。
+func _watch_restart() -> void:
+	if not GameState.is_collapsed:
+		return
+	if GameState.collapse_elapsed < GameState.EPILOGUE_SECONDS:
+		return
+	if not Input.is_action_just_pressed("rest"):
+		return
+	restart()
+
+
+func restart() -> void:
+	GameState.reset()
+	storm.reset()
+	var start := world.dune.find_viewpoint()
+	player.global_position = Vector3(start.x, world.height_at(start.x, start.y), start.y)
+	player.set_yaw(START_YAW)
+	player.reset_body()
+	_place_sun_behind_statue()
+	mirage.set_sun_direction(world.sun_direction())
+	_mirage_height = world.height_at(player.global_position.x, player.global_position.z) + 10.0
+	if post != null:
+		post.set_eye_close(0.0)
 
 
 ## 把幻影重新摆到玩家前方固定距离处。
@@ -154,11 +210,10 @@ func _update_mirage(delta: float) -> void:
 
 ## 幻影的浓度由"渴"和沙暴共同决定。
 ##
-## 不是按时间表演出：渴是真实存在的（水囊在倒数），沙暴是真实存在的，
+## 不是按时间表演出：累是真实存在的（体力在掉），沙暴是真实存在的，
 ## 玩家能隐约意识到"我越难受，它越清楚"——这比单纯定时出现可怕得多。
 ## 保底 0.28 是让第一次抬头就能看见，否则玩家根本不知道有这东西。
 func _mirage_presence() -> float:
-	var thirst := 1.0 - GameState.water
 	return clampf(
-		0.28 + thirst * 0.7 + GameState.storm_intensity * 0.6, 0.0, 1.0
+		0.28 + GameState.fatigue() * 0.7 + GameState.storm_intensity * 0.6, 0.0, 1.0
 	)

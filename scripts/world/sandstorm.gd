@@ -35,6 +35,14 @@ var _timer := 0.0
 
 
 func _physics_process(delta: float) -> void:
+	advance(delta)
+
+
+## 推进一帧：先走相位机，再把结果落到世界和玩家身上。
+##
+## 抽成一个公开方法，是为了让测试能**按真实相位走**（而不是自己凑一个
+## 强度曲线）：[体力契约] 和 [地形够不够大] 两条都要拿真实的沙暴算账。
+func advance(delta: float) -> void:
 	_advance_phase(delta)
 	_apply()
 
@@ -82,6 +90,18 @@ func _apply() -> void:
 ## 直接跳到某个强度，供测试与调试使用（跳过等待）。
 func force_intensity(value: float) -> void:
 	intensity = clampf(value, 0.0, 1.0)
+	_apply()
+
+
+## 重走一次时把天气打回平静。
+##
+## **必须连 _apply() 一起走**：只把 _phase / intensity 归零的话，雾浓度、
+## 天光和那个把玩家往一边推的力，还停在上一局最后一帧的状态上——
+## 新的一局会从"平静但是被推着走"开始，而这种错误在画面上很难认出来。
+func reset() -> void:
+	_phase = 0
+	_timer = 0.0
+	intensity = 0.0
 	_apply()
 
 
