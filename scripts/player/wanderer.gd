@@ -31,6 +31,11 @@ func _ready() -> void:
 	_camera.name = "Eyes"
 	_camera.current = true
 	_camera.fov = 68.0
+	# far 必须把幻影装下。默认的 4000 m 会在城郭中间切一刀：
+	# 幻影的近墙 1.9 km、远墙 6.9 km，后半个城本来该"先褪色再消失"
+	# （见 mirage.gdshader 的 haze），结果被远裁剪面直接切掉，留下一道硬边。
+	# 远处的淡出交给幻影自己的空气衰减，不交给裁剪面。
+	_camera.far = 12000.0
 	_camera.position = Vector3(0.0, eye_height, 0.0)
 	add_child(_camera)
 	# headless 测试里没有窗口系统，抓鼠标会报错

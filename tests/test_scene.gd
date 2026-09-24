@@ -17,6 +17,8 @@ func _ready() -> void:
 	_test_storm_model()
 	_test_ground_following()
 	_test_mirage_detail()
+	_test_statue_readability()
+	await _test_backlight()
 	await _test_mirage_keeps_distance()
 	await _test_scene_is_outdoors()
 	await _test_main_scene_assembles()
@@ -217,6 +219,288 @@ func _test_mirage_detail() -> void:
 	mirage.queue_free()
 
 
+## 弥勒必须**能被读成一个人**。上一版认不出来，不是细节不够，是下面三条
+## 每一条都被违反了：光把像吞了、像被切片了、像和城共用一份料。
+##
+##   1. 举身光是**环**：洞的内径必须大于肩宽，头肩才从环里透出来。
+##      "看起来像环"这种事要落到几何上：这里直接去数 halo 那个 mesh 的顶点，
+##      断言**没有任何一个顶点落在环心附近**——洞里是空的，不是"画上去的洞"。
+##   2. 像身的折射被压到城郭的十分之一：人形经不起切片。
+##   3. 像身另拿一份材质，而且是加色的光背 + 混色的像身两份。
+##
+## 这一版又多了一条：**像身的几何不再是自己拼的**，而是一份归一化过的外部
+## 白膜。所以这里连白膜本身也一起验收——高矮、落点、朝向三样都断言，
+## 因为这三样正是 `blender/build_maitreya.py` 负责的事，而它们错了画面
+## 不一定看得出来（转 180° 的像远看也"是尊像"）。
+func _test_statue_readability() -> void:
+	print("[弥勒可读性]")
+	var h := Mirage.STATUE_HEIGHT
+	# 倍率**现在就是设计态**：4 倍（需求方 2026-09-24 明确指定"上放大 4 倍
+	# 的那个"）。它不再是"实验旋钮"，而是构图契约的一部分——
+	# "整尊装进水平前视"那条旧约束随之反转成"像头必须冲出画面上沿、
+	# 但抬头够得着"（见 _test_scene_is_outdoors 的第 3 条）。
+	#
+	# 这条断言守的仍然是"出厂态 == 设计态"：改倍率必须是**显式**的编辑，
+	# 连带重解构图约束和这里的数字，不能靠某个调试开关悄悄留在代码里。
+	check(
+		is_equal_approx(Mirage.statue_scale, 4.0),
+		"像身倍率出厂态是 4.0（当前 %.2f）——改了它必须重解构图约束"
+		% Mirage.statue_scale
+	)
+	# 台座必须整块埋进沙里，而且不能埋过头。
+	#
+	# 下界守的是"台座还在"：白膜的 0~16% 是博物馆的方墩子（量法见
+	# STATUE_PEDESTAL_RATIO 的注释），露在沙脊线上就会把比例尺泄露出去。
+	# 上界守的是"人还站着"：埋掉三分之一个像，剩下的就不是一尊立像了。
+	check(
+		Mirage.STATUE_PEDESTAL_RATIO >= 0.12 and Mirage.STATUE_PEDESTAL_RATIO <= 0.25,
+		"台座埋深在合理区间（%.0f%% 像高）" % (Mirage.STATUE_PEDESTAL_RATIO * 100.0)
+	)
+	check(
+		Mirage.statue_top_y() > Mirage.STATUE_HEIGHT * 0.6 * Mirage.statue_scale,
+		"埋掉台座之后人还站着（沙面之上 %.0f m）" % Mirage.statue_top_y()
+	)
+	check(
+		ResourceLoader.exists(Mirage.STATUE_MESH_PATH),
+		"白膜在（%s）" % Mirage.STATUE_MESH_PATH
+	)
+	check(
+		Mirage.HALO_INNER_RATIO > Mirage.STATUE_SHOULDER_RATIO,
+		"举身光的洞比肩宽（内径 %.3fh > 肩半宽 %.3fh）"
+		% [Mirage.HALO_INNER_RATIO, Mirage.STATUE_SHOULDER_RATIO]
+	)
+	check(
+		Mirage.STATUE_SHEAR < Mirage.CITY_SHEAR * 0.2,
+		"像身的折射远小于城郭（%.0f m vs %.0f m）——人形不切片"
+		% [Mirage.STATUE_SHEAR, Mirage.CITY_SHEAR]
+	)
+
+	var mirage := Mirage.new()
+	add_child(mirage)
+
+	var statue := mirage.get_node_or_null("Statue") as MeshInstance3D
+	var halo := mirage.get_node_or_null("Halo") as MeshInstance3D
+	var city := mirage.get_node_or_null("Loulan") as MeshInstance3D
+	check(city != null, "城郭 mesh 已建")
+	check(statue != null, "像身是一份独立的 mesh")
+	check(halo != null, "举身光是一份独立的 mesh")
+
+	if statue != null:
+		var verts: PackedVector3Array = statue.mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+		check(
+			verts.size() > 20000,
+			"像身是白膜而不是几个基本体（%d 个顶点）" % verts.size()
+		)
+		var lo := Vector3(INF, INF, INF)
+		var hi := Vector3(-INF, -INF, -INF)
+		for v: Vector3 in verts:
+			lo.x = minf(lo.x, v.x)
+			lo.y = minf(lo.y, v.y)
+			lo.z = minf(lo.z, v.z)
+			hi.x = maxf(hi.x, v.x)
+			hi.y = maxf(hi.y, v.y)
+			hi.z = maxf(hi.z, v.z)
+		var size := hi - lo
+		check(
+			absf(size.y - h) < h * 0.01,
+			"像高就是 STATUE_HEIGHT（%.0f m vs %.0f m）" % [size.y, h]
+		)
+		check(
+			absf(lo.y) < h * 0.01,
+			"脚底落在 y=0（%.1f m）——不然它会浮在沙面上或者埋进去" % lo.y
+		)
+		# 朝向：转 90° 会把宽和厚换个个儿。人是**横着宽、前后薄**的。
+		check(
+			size.z > size.x * 1.15,
+			"横向宽于前后（%.0f m vs %.0f m）——朝向没转过 90°" % [size.z, size.x]
+		)
+		# 朝向：转 180° 时宽厚不变，只有"脸冲哪边"反了，所以要拿一个**不对称**
+		# 的局部特征去量。
+		#
+		# 上一版量的是肚子（大肚弥勒的签名，0.50h~0.60h 往 -X 鼓 192 m）。
+		# 犍陀罗立佛没有肚子，但头部更好用：这尊是**低头前倾**的姿态，整颗头
+		# 都落在轴线之前——鼻尖最前到 -142 m，后脑只到 +36 m。转 180° 就互换。
+		var head_front := INF
+		var head_back := -INF
+		for v: Vector3 in verts:
+			if v.y > h * 0.90 and v.y < h * 0.99:
+				head_front = minf(head_front, v.x)
+				head_back = maxf(head_back, v.x)
+		check(
+			-head_front > head_back,
+			"脸朝 -X（头最前 %.0f m > 后脑 %.0f m）——脸朝着玩家" % [-head_front, head_back]
+		)
+
+		# 白膜换过一次（大肚弥勒 → 犍陀罗立佛），像身从"最宽 0.284h"瘦到
+		# "最宽 0.177h"。下面两条把这个变化**钉在几何上**，而不是钉在注释里：
+		# 常量写错了画面上看不出来（环还是那个环），只有量 mesh 才知道。
+		var half_at_halo := 0.0
+		var widest_half := 0.0
+		var widest_y := 0.0
+		for v: Vector3 in verts:
+			var half := absf(v.z)
+			if half > widest_half:
+				widest_half = half
+				widest_y = v.y
+			if absf(v.y - h * Mirage.HALO_CENTER_RATIO) <= h * 0.012:
+				half_at_halo = maxf(half_at_halo, half)
+		var shoulder := h * Mirage.STATUE_SHOULDER_RATIO
+		check(
+			absf(half_at_halo - shoulder) < shoulder * 0.15,
+			"肩半宽常量和白膜对得上（常量 %.0f m vs 量得 %.0f m）" % [shoulder, half_at_halo]
+		)
+		# 环的洞要比像身**最宽处**还宽——不只是肩。这条才是"环不埋进身体"的
+		# 真正条件，肩只是它在环心那一层的样子。
+		check(
+			h * Mirage.HALO_INNER_RATIO > widest_half,
+			"环的洞比像身最宽处还宽（内径 %.0f m > 最宽半宽 %.0f m @ %.2fh）"
+			% [h * Mirage.HALO_INNER_RATIO, widest_half, widest_y / h]
+		)
+		# 像身读的是文件，拿不到 _xform 的偏移；漏了这一步的话，像身会留在
+		# 城中心、只有举身光挪到城墙前，屏幕上是一枚**空心的发光圆环**
+		# （这是真踩过的，不是假设）。
+		check(
+			statue.position.is_equal_approx(mirage.statue_offset()),
+			"像身和举身光共用同一根轴线（像身在 %s）" % statue.position
+		)
+		var material := statue.material_override as ShaderMaterial
+		check(
+			float(material.get_shader_parameter("dissolve_amount")) < 0.5,
+			"像身几乎不溶解（%.2f < 0.5）——溶解会在像身上啃出洞"
+			% float(material.get_shader_parameter("dissolve_amount"))
+		)
+		check(
+			float(material.get_shader_parameter("veil")) <= 0.3,
+			"逆光薄纱收着（%.2f ≤ 0.30）——糊过头剪影就没了"
+			% float(material.get_shader_parameter("veil"))
+		)
+		check(city != null and material != city.material_override, "像身和城郭**不共用**材质")
+
+	if halo != null:
+		var material := halo.material_override as ShaderMaterial
+		check(
+			material.shader.code.contains("blend_add"),
+			"举身光是加色材质（blend_add）——光只能加亮，不能遮挡"
+		)
+		# 环心必须是**空的**。这不是美学，是"像身从洞里透出来"的物理前提。
+		#
+		# 注意尺度：举身光的 mesh 是**按当前倍率拼的**（_design_halo 里
+		# `var h := statue_height()`），所以这一段必须走 statue_height()。
+		# 上面那个 `h` 是**白膜本身**的尺寸，4 倍时两者差 4 倍——
+		# 拿错了环心就跑到洞里，这条断言会假绿。
+		var halo_h := Mirage.statue_height()
+		var center := Vector3(
+			halo_h * Mirage.HALO_BEHIND_RATIO, halo_h * Mirage.HALO_CENTER_RATIO, 0.0
+		)
+		# 用像身自己的偏移助手，不在这里重抄一遍常数：像身和光环必须
+		# 落在同一根轴线上，而这个"同一根"只应该有一个出处。
+		center += mirage.statue_offset()
+		var verts: PackedVector3Array = halo.mesh.surface_get_arrays(0)[Mesh.ARRAY_VERTEX]
+		var nearest := INF
+		for v: Vector3 in verts:
+			nearest = minf(nearest, Vector2(v.y - center.y, v.z - center.z).length())
+		var hole := Mirage.HALO_INNER_RATIO * halo_h
+		check(
+			nearest > hole - 2.0,
+			"环心是空的（最近的顶点离环心 %.0f m ≥ 内径 %.0f m）" % [nearest, hole]
+		)
+		# 光背的**径向标尺**：几何铺到哪、亮带画在哪一圈、光焰伸多远。
+		#
+		# 三个数各写一遍就会歪，而"亮带跑到洞里去了"在屏幕上只像"没调好"，
+		# 不像出错——所以这里把材质的 uniform 和几何常数**对账**。
+		var ring_material := halo.material_override as ShaderMaterial
+		var r_inner := float(ring_material.get_shader_parameter("ring_inner"))
+		var r_core := float(ring_material.get_shader_parameter("ring_core"))
+		var r_tip := float(ring_material.get_shader_parameter("ring_tip"))
+		var r_sigma := float(ring_material.get_shader_parameter("ring_sigma"))
+		check(
+			r_inner < r_core and r_core < r_tip,
+			"亮带落在几何里（内径 %.0f < 环心线 %.0f < 光焰尖 %.0f）" % [r_inner, r_core, r_tip]
+		)
+		check(
+			absf(r_inner - halo_h * Mirage.HALO_INNER_RATIO) < 1.0
+			and absf(r_tip - halo_h * Mirage.HALO_TIP_RATIO) < 1.0,
+			"环的标尺按当前倍率算（内径 %.0f / 尖 %.0f）" % [r_inner, r_tip]
+		)
+		# 着色器是在盘面上按半径取数的，所以它拿到的环心必须**就是几何的环心**
+		# （本地坐标，含 statue_offset）。差一点点，亮带就整体偏心——
+		# 屏幕上表现为"环的一边粗一边细"，很容易被当成透视。
+		var ring_center_uv := ring_material.get_shader_parameter("ring_center") as Vector2
+		check(
+			absf(ring_center_uv.x - center.y) < 1.0 and absf(ring_center_uv.y - center.z) < 1.0,
+			"着色器的环心 = 几何的环心（%.0f/%.0f vs %.0f/%.0f）"
+			% [ring_center_uv.x, ring_center_uv.y, center.y, center.z]
+		)
+		# 圆环面必须一直铺到光焰尖：铺短了，最外那截光焰会**凭空截断**——
+		# 屏幕上是"一圈光的外面糊了一圈整齐的切口"，比不画还难看。
+		var far := 0.0
+		for v: Vector3 in verts:
+			far = maxf(far, Vector2(v.y - center.y, v.z - center.z).length())
+		check(
+			absf(far - r_tip) < r_tip * 0.02,
+			"圆环面一直铺到光焰尖（最远顶点 %.0f vs 标尺 %.0f）" % [far, r_tip]
+		)
+		# **这一条是这一版的核心**：亮带必须比上一版那根管子的管壁细得多。
+		# 上一版的"环"是一根 0.07h 粗的 TorusMesh 管子，4 倍之后 302 m 宽，
+		# 屏幕上是一条 110 px 的亮带——"塑料管"就是从那儿来的。
+		# 亮带现在是 σ（高斯标准差），只要它还明显小于半个管壁，
+		# 那一版的样子就回不来。
+		check(
+			r_sigma < halo_h * (Mirage.HALO_OUTER_RATIO - Mirage.HALO_INNER_RATIO) * 0.5,
+			"亮带比上一版的管壁细（σ %.0f m < 半个管壁 %.0f m）"
+			% [r_sigma, halo_h * (Mirage.HALO_OUTER_RATIO - Mirage.HALO_INNER_RATIO) * 0.5]
+		)
+
+	mirage.queue_free()
+
+
+## 逆光：太阳必须压在弥勒像的**正后方**，而且贴得低。
+##
+## 这条守的是"逆光走向弥勒"那张画。上一版太阳方位 118°，像的方位是 -31°，
+## 差了 59°——画面上"也有太阳、也有像"，但像身是侧光，那层佛性根本没发生。
+## 更麻烦的是：这种错**在画面上看着还挺正常**，只有把两个方位角摆到一起才看得见。
+func _test_backlight() -> void:
+	print("[逆光]")
+	var scene: PackedScene = load("res://scenes/main.tscn")
+	var instance: Node = scene.instantiate()
+	add_child(instance)
+	await get_tree().process_frame
+
+	var world: Node = instance.get("world")
+	if world == null:
+		check(false, "世界缺失")
+		instance.queue_free()
+		return
+
+	var to_sun: Vector3 = world.call("sun_direction")
+	# 方位角的口径与截图诊断一致：atan2(z, x)，玩家开局朝 +X 时为 0。
+	var sun_bearing := rad_to_deg(atan2(to_sun.z, to_sun.x))
+	var statue_bearing: float = instance.call("statue_bearing_deg")
+	var gap := rad_to_deg(
+		absf(angle_difference(deg_to_rad(sun_bearing), deg_to_rad(statue_bearing)))
+	)
+	check(
+		gap < 3.0,
+		"太阳压在弥勒的方位上（太阳 %+.1f° vs 像 %+.1f°，差 %.1f°）"
+		% [sun_bearing, statue_bearing, gap]
+	)
+	check(to_sun.y > 0.0, "太阳在地平线之上")
+	var elevation := rad_to_deg(asin(to_sun.y))
+	check(elevation < 24.0, "太阳是低角度的（%.1f° < 24°）——逆光要压着地平线" % elevation)
+
+	# 太阳的光刺也得跟着走：它按 sun_direction 绕方位角调制，
+	# 忘了同步的话，转头就会发现芒从天上挪到了别处。
+	var env_node := instance.get_node_or_null("Desert/WorldEnvironment")
+	if env_node != null:
+		var sky_mat: ShaderMaterial = env_node.environment.sky.sky_material
+		var sky_sun: Vector3 = sky_mat.get_shader_parameter("sun_direction")
+		check(
+			sky_sun.distance_to(to_sun) < 0.01,
+			"天空的太阳方向和世界的太阳方向一致"
+		)
+	instance.queue_free()
+
+
 ## 海市蜃楼的核心行为：**走不近**。
 ##
 ## 它是光的像，不是实体——玩家朝它走，它必须同步后退，那段距离永远不变。
@@ -268,7 +552,8 @@ func _horizontal_gap(a: Node3D, b: Node3D) -> float:
 ## 所以这条测试守的是三条几何契约，它们同时也是"巨物感"的来源：
 ##   1. 横向量不出来 —— 城墙两端切出画外；
 ##   2. 头顶必须留空 —— 全场最高点也压在天顶之下；
-##   3. 顶得看不见 —— 弥勒像的头顶要出画面（水平前视时看不到脸，得抬头）。
+##   3. 顶得看不见 —— 弥勒像的头顶**必须**冲出画面上沿（4 倍之后的新契约：
+##      "装不下"才是巨物），但抬头必须够得着佛头。
 ##
 ## 顺带守天空本身：天顶不能是暗的（暗天顶 = 天花板），而且抬头要有光源。
 func _test_scene_is_outdoors() -> void:
@@ -308,21 +593,55 @@ func _test_scene_is_outdoors() -> void:
 		"城墙两端切出画外（角楼方位 %.0f° > 半视角 %.0f°）" % [corner_azimuth, half_h]
 	)
 
-	# 2) 头顶留空：全场最高点是弥勒的举身光尖，它也得压在天顶之下
+	# 2) 抬头有顶：全场最高点是弥勒的举身光尖——它必须**够得着**。
+	#
+	# 上一版这条写的是"最高点也得压在天顶之下（< 50°）"，那时像和光背都还
+	# 装在画面里。4 倍之后两者一起冲出画面上沿（光尖 ~71°），于是这条的含义
+	# 改成"仰到俯仰上限能看见顶"——再写"必须 < 50°"就等于把已经决定要
+	# 溢出画面的东西又量回画面里，是自欺。
+	#
+	# 但"够得着"仍然是有分量的约束：它守的是**这不是一间屋子**。玩家仰到
+	# 上限时画面上沿在 111° 以上，越过光尖还有几十度干净的天；哪天有人把像
+	# 再放大到连上限都追不上，那才是回到了"穹顶"。
 	var statue_x := origin.x - Mirage.CITY_HALF - Mirage.STATUE_FRONT_OF_WALL
 	var statue_z := origin.z + Mirage.STATUE_SIDE
-	var halo_top := Vector3(
-		statue_x, origin.y + Mirage.STATUE_HEIGHT * 1.22, statue_z
-	)
+	var pitch_limit_deg := rad_to_deg(float(player.get("pitch_limit")))
+	var halo_top := Vector3(statue_x, origin.y + Mirage.halo_top_y(), statue_z)
 	var halo_elev := _elevation(eye, halo_top)
-	check(halo_elev < 50.0, "全场最高点也压在天顶之下（%.1f° < 50°）" % halo_elev)
+	check(
+		halo_elev < pitch_limit_deg,
+		"全场最高点够得着（举身光尖 %.1f° < 俯仰上限 %.1f°，余量 %.1f°）"
+		% [halo_elev, pitch_limit_deg, pitch_limit_deg - halo_elev]
+	)
 
-	# 3) 顶看不见：像头出画面，必须抬头才看得见脸
-	var head := Vector3(statue_x, origin.y + Mirage.STATUE_HEIGHT * 0.902, statue_z)
+	# 3) 逆光走向弥勒：**4 倍**之后这条反过来了，反转是需求方的明确指示
+	#    （"佛还是不够巨物感……你能先放大个 4 倍看看？"）。
+	#
+	# 上一版守的是"像头必须进画面"：那时像头 30.3°、画面上沿 34°，
+	# 读法是"看得见、但它是远处的一尊像"。这一版像头 ~67°，
+	# **故意的**——巨物的第一读法就是装不下。
+	#
+	# 但"装不下"和"够不着"是两件事，上一版被骂过一次的正是后者：
+	# 像顶 37.6° 而画面上沿 34°，抬头也追不上，那是一尊**没有头**的像。
+	# 所以这里守三条：
+	#
+	#   a. 像头必须**明显**溢出画面上沿（> 上沿 + 10°）——刚好压在边上
+	#      读起来像构图没对齐，不像巨物；
+	#   b. 抬头必须够得着（像头仰角 < 俯仰上限 − 8°）——脸不能丢；
+	#   c. 主塔仍然低于像头（下一条 check）。
+	# 像头高度走 statue_top_y()：白膜原点在**台座底面**，埋掉台座之后
+	# 沙面之上并没有 STATUE_HEIGHT 那么高（4 倍时这个差值是 691 m）。
+	var head := Vector3(statue_x, origin.y + Mirage.statue_top_y(), statue_z)
 	var head_elev := _elevation(eye, head)
 	check(
-		head_elev > half_v,
-		"水平前视时看不见像的脸（像头 %.1f° > 画面上沿 %.0f°）" % [head_elev, half_v]
+		head_elev > half_v + 10.0,
+		"像头明显溢出画面上沿（像头 %.1f° > 上沿 %.0f° + 10°）——装不下才是巨物"
+		% [head_elev, half_v]
+	)
+	check(
+		head_elev < pitch_limit_deg - 8.0,
+		"抬头够得着佛头（像头 %.1f° < 俯仰上限 %.1f° − 8°，需抬头 %.1f°）"
+		% [head_elev, pitch_limit_deg, head_elev - half_v]
 	)
 
 	# 城郭本体（主塔）不该比弥勒更高，主次一乱就只剩"一片高的东西"

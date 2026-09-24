@@ -30,6 +30,10 @@ uniform float sun_strength : hint_range(0.0, 6.0) = 2.2;
 uniform float sun_focus : hint_range(2.0, 400.0) = 110.0;
 uniform float sun_halo : hint_range(0.0, 4.0) = 0.85;
 uniform float sun_halo_focus : hint_range(1.0, 40.0) = 5.0;
+// 光刺：太阳周围那一圈放射状的芒。
+// 逆光走向弥勒时，像身剪影正好立在芒的中心——"佛光"最便宜也最直接的一笔。
+uniform float ray_strength : hint_range(0.0, 3.0) = 0.85;
+uniform float ray_count : hint_range(0.0, 32.0) = 10.0;
 // 太阳方向由 GDScript 每帧写入，不依赖内置光照变量：
 // Godot 的 sky shader 里没有 SUN_DIR，LIGHT0_DIR 的方向约定也容易搞反，
 // 自己传一个向量最省事，还能和 DirectionalLight3D 严格对齐。
@@ -105,6 +109,19 @@ void sky() {
 	float sun_dot = max(dot(dir, normalize(sun_direction)), 0.0);
 	col += sun_tint * pow(sun_dot, sun_focus) * sun_strength;
 	col += sun_tint * pow(sun_dot, sun_halo_focus) * sun_halo;
+
+	// 光刺。关键在"用绕太阳方向的方位角去调制，而不是用屏幕坐标"：
+	// 前者是芒从太阳射出来，后者是条纹贴在屏幕上——转头就能分辨。
+	// 芒必须**跟着太阳走**，太阳一挪（比如把它挪到弥勒背后），芒也跟着挪。
+	if (ray_strength > 0.0) {
+		vec3 sd = normalize(sun_direction);
+		vec3 t1 = normalize(cross(sd, vec3(0.0, 1.0, 0.0)));
+		vec3 t2 = normalize(cross(sd, t1));
+		float ang = atan(dot(dir, t2), dot(dir, t1));
+		float ray = 0.5 + 0.5 * sin(ang * ray_count + TIME * 0.12);
+		ray = ray * ray;
+		col += sun_tint * pow(sun_dot, 14.0) * ray * ray_strength;
+	}
 
 	// 贴地的一层散射亮：沙尘被低角度光打透
 	col += horizon_color * 0.10 * pow(1.0 - h, 6.0);

@@ -25,7 +25,7 @@ var mirage: Mirage
 ## 摆位按"正面城墙"算，不是按城的中心：城墙在玩家前方 1400 m，城的中心
 ## 再往后推 CITY_HALF。偏移必须算对，否则城墙会跑到玩家背后，变成"站在城里"。
 ##
-## 为什么是 1400 m，而不是上一版的 250 m（那一版是"贴脸放大"）：
+## 为什么是 1900 m，而不是上一版的 250 m（那一版是"贴脸放大"）：
 ##
 ## 上一版城墙离玩家只有 250 m，城郭横着切出画外、城门楼顶到 63°。角度上
 ## 它当然"装不下"，但玩家抬头看到的是**穹顶**——城墙像一圈护墙板，角楼的
@@ -33,16 +33,50 @@ var mirage: Mirage
 ## **围住视点和压住视点，在视觉上是同一件事，而"围"就等于"室内"。**
 ##
 ## 巨物的压迫感不来自"占满画面"，来自**量不出来**：
-##   横向  城墙两端在 ±57°，半视角只有 48° —— 转到哪边都看不到头；
-##   纵深  近墙 1.4 km、远墙 5.8 km，后半座城先褪色再消失；
-##   纵向  主塔顶 32° 还在画面里，但上半截溶进天空，找不到顶。
+##   横向  城墙两端在 ±52.8°，水平半视角只有 50.2° —— 转到哪边都看不到头；
+##   纵深  近墙 1.9 km、远墙 6.9 km，后半座城先褪色再消失；
+##   纵向  主塔顶 27.4° 还在画面里，但上半截溶进天空，找不到顶。
 ## 三条同时成立时它才"大到量不出来"，而头顶 30° 以上始终是干净的天。
 ## 远端有多远由幻影自己的空气衰减管（它关掉了 Godot 的雾，见 mirage.gdshader）。
-const MIRAGE_FRONT_WALL := 1400.0
+##
+## ### 1900 m：这个数字是**被弥勒反推**出来的
+##
+## 1400 m 那一版把城门楼顶到 24.5°、像头到 37.6°，而**画面顶只有 34°**。
+## 于是开局看不见弥勒的头——一尊没有头的像。巨物恐怖是拿到了，但这一关要的
+## 是"逆光走向弥勒"，得先看得见弥勒。
+##
+## 把像头压进画面的唯一自由量是观距：像离玩家 1735 m 时头顶落到 28.9°。
+## 像站在城墙前 300 m，所以城墙跟着挪到 1900 m；城郭半宽同步从 2200 m
+## 放到 2500 m，横向照旧切出画外——**整座城是一起挪远的，不是一次缩小**。
+## 具体四条约束和验算写在 Mirage 的文件头。
+const MIRAGE_FRONT_WALL := 1900.0
 
 
 func _mirage_offset() -> Vector3:
 	return Vector3(MIRAGE_FRONT_WALL + Mirage.CITY_HALF, 0.0, 30.0)
+
+
+## 弥勒像相对玩家的水平方位（度）：`atan2(z, x)`，玩家开局朝 +X 时为 0。
+##
+## 像的世界坐标 = 幻影节点 + 像在城里的本地坐标，而幻影节点 = 玩家 + 偏移量，
+## 两项相减正好把玩家消掉——**这个方位是个常量**，走到哪儿都一样。
+## （它也必须是常量：幻影"走不近"，看向它的视角本来就永远不变。）
+func statue_bearing_deg() -> float:
+	var statue := _mirage_offset() + Vector3(
+		-Mirage.CITY_HALF - Mirage.STATUE_FRONT_OF_WALL, 0.0, Mirage.STATUE_SIDE
+	)
+	return rad_to_deg(atan2(statue.z, statue.x))
+
+
+## 把太阳摆到弥勒像的正后方。
+##
+## 这一关要的画面是"逆光走向弥勒"：太阳压在像的背后、贴着地平线，
+## 像身是一道剪影，光从它背后潽出来。所以太阳的**方位**不能写死一个角度，
+## 得从像的位置反解——像挪了，太阳跟着挪。
+## （仰角另说，它由 DesertWorld 的 sun_elevation_deg 管。）
+func _place_sun_behind_statue() -> void:
+	if world != null:
+		world.set_sun_behind_bearing(statue_bearing_deg())
 
 var _time := 0.0
 var _mirage_height := 0.0
@@ -66,6 +100,9 @@ func _ready() -> void:
 		start.x, world.height_at(start.x, start.y), start.y
 	)
 	player.set_yaw(START_YAW)
+	# 太阳定在弥勒背后（逆光）。必须在世界建好之后、幻影之前——
+	# 幻影的材质要拿这个方向去算逆光薄纱。
+	_place_sun_behind_statue()
 
 	storm = Sandstorm.new()
 	storm.name = "Sandstorm"
@@ -80,6 +117,7 @@ func _ready() -> void:
 	mirage = Mirage.new()
 	mirage.name = "Mirage"
 	add_child(mirage)
+	mirage.set_sun_direction(world.sun_direction())
 	_mirage_height = world.height_at(player.global_position.x, player.global_position.z) + 10.0
 
 	hud = Hud.new()

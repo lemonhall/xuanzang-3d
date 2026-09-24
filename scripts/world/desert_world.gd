@@ -15,13 +15,21 @@ extends Node3D
 
 @export_group("太阳")
 ## 低角度是关键：太阳越高，沙丘越平，影子越短，画面越像儿童插画。
-@export_range(-10.0, 90.0, 0.5) var sun_elevation_deg := 28.0
-## 方位角 118°：太阳在玩家**正前方偏右**、低悬在沙海上。
+## 18° 是"逆光够狠、沙丘还留得住起伏"的折中：再高，像的剪影就散了；
+## 再低，太阳会被城墙和近处沙脊吃掉，画面上只剩一片压暗的沙。
+@export_range(-10.0, 90.0, 0.5) var sun_elevation_deg := 18.0
+## 方位角。**这个值由 main.gd 按"太阳必须落在弥勒像身后"反解出来**
+## （set_sun_behind_bearing），这里的数字只是脱离主场景单独跑世界时的兜底。
+##
+## 方位角的约定容易搞反，写清楚：`_sync_sky_sun` 算出的 to_sun 水平分量是
+## `(sin a, -cos a)`，所以"玩家朝向 +X"时 a=90° 是正前方偏 +Z、
+## a=58.7° 才落在弥勒像（在玩家左前方 31°）的正后方。
+##
 ## 原案是 298°（在玩家背后），结果是看向幻影时整片沙丘全是顺光——
 ## 近坡全亮、没有一道暗脊，画面下部塌成一张奶油色纸。
-## 逆光把沙丘变成明暗相间的一道道脊线，幻影也正好立在光晕里，
-## 剪影立得住——"看不到脸"才有可能成立。
-@export_range(0.0, 360.0, 1.0) var sun_azimuth_deg := 118.0
+## 118°（正前方偏右）也不是要的方向：那时太阳在像的**右边 59°**，
+## 像身是侧光，谈不上"佛前一片逆光"。
+@export_range(0.0, 360.0, 1.0) var sun_azimuth_deg := 58.7
 ## 3.2 会把 0.86 反照率的沙面直接顶成白纸（ACES 之后一片奶油色），
 ## 沙丘的形状、风纹、明暗全被吃掉——而"看不出远近"正是室内感的来源之一。
 @export_range(0.0, 12.0, 0.05) var sun_energy := 2.2
@@ -210,11 +218,18 @@ func _build_environment() -> void:
 	_sky_material.set_shader_parameter("zenith_color", Color(0.46, 0.47, 0.53))
 	_sky_material.set_shader_parameter("horizon_power", 0.9)
 	_sky_material.set_shader_parameter("sun_tint", Color(1.0, 0.85, 0.58))
-	# 紧斑 + 大晕：抬头要看得见"光是从天上来的"
+	# 紧斑 + 大晕：抬头要看得见"光是从天上来的"。
+	# 晕收窄了一点（focus 5 → 6.5、强度 0.85 → 0.62）：太阳现在压在弥勒身后，
+	# 晕太大的话整片天都是过曝的白，像身的剪影就没了——**逆光要的是
+	# "后面的光把前面的东西压成剪影"，晕一大就变成"后面和前面一样亮"**。
 	_sky_material.set_shader_parameter("sun_strength", 2.2)
 	_sky_material.set_shader_parameter("sun_focus", 110.0)
-	_sky_material.set_shader_parameter("sun_halo", 0.85)
-	_sky_material.set_shader_parameter("sun_halo_focus", 5.0)
+	_sky_material.set_shader_parameter("sun_halo", 0.62)
+	_sky_material.set_shader_parameter("sun_halo_focus", 6.5)
+	# 光刺（佛光的那一圈芒）。它绕太阳的方位角排布，太阳挪到像背后，
+	# 芒就从像的背后射出来——这是"逆光"最直接的读法。
+	_sky_material.set_shader_parameter("ray_strength", 0.90)
+	_sky_material.set_shader_parameter("ray_count", 10.0)
 	_sky_material.set_shader_parameter("cloud_amount", cloud_amount)
 	# 频率高一点：value noise 在低频下会露出方格，看起来像低模分面。
 	# 9.0 配逐层旋转的 fbm，才是"贴地的沙尘条纹"而不是"天花板上的方斑"。
@@ -233,7 +248,8 @@ func _build_environment() -> void:
 	# 画面就变成了没有体积的卡通色块。
 	_environment.ambient_light_sky_contribution = 0.55
 	_environment.ambient_light_color = Color(0.42, 0.52, 0.72)
-	_environment.ambient_light_energy = 0.45
+	# 环境光压到 0.40：逆光要留出"暗部"，环境光一给足，明暗差就被冲平了。
+	_environment.ambient_light_energy = 0.40
 
 	# ACES 比 AgX 更有对比和色彩厚度；AgX 在高动态下更"平"，
 	# 这一关要的恰恰是不平的强光。
@@ -261,7 +277,9 @@ func _build_environment() -> void:
 	_environment.fog_density = fog_density
 	_environment.fog_sky_affect = 0.35
 	_environment.fog_aerial_perspective = 0.7
-	_environment.fog_sun_scatter = 0.35
+	# 0.55：逆光时相机和幻影之间那层沙尘被太阳打亮，就是画面里那道"光柱"。
+	# 顺光时这个值看不出效果，逆光时它是免费的一层空气感。
+	_environment.fog_sun_scatter = 0.55
 	# 贴地沙雾：沙不是均匀悬在空中的，越贴近地面越浓
 	_environment.fog_height = 6.0
 	# 0.06 太重：视线贴着沙面走，200 m 外的沙丘就被糊平了，
@@ -306,9 +324,31 @@ func _apply_sun() -> void:
 func _sync_sky_sun() -> void:
 	if _sky_material == null:
 		return
+	_sky_material.set_shader_parameter("sun_direction", sun_direction())
+
+
+## 指向太阳的单位向量（世界坐标）。天空、幻影的逆光薄纱都读它，
+## 所以它只有一个出口，免得两处各自算、算歪了还对不上。
+func sun_direction() -> Vector3:
 	var e := deg_to_rad(sun_elevation_deg)
 	var a := deg_to_rad(sun_azimuth_deg)
-	var to_sun := Vector3(cos(e) * sin(a), sin(e), -cos(e) * cos(a))
-	_sky_material.set_shader_parameter(
-		"sun_direction", to_sun.normalized()
-	)
+	return Vector3(cos(e) * sin(a), sin(e), -cos(e) * cos(a)).normalized()
+
+
+## 把太阳摆到某个**方位**（度）上。
+##
+## 方位角的定义和截图诊断里那个"方位 +X 偏 Z 为正"一致：
+## `bearing = atan2(方向.z, 方向.x)`。玩家开局朝 +X，所以
+## 弥勒像的方位就是 `atan2(像在玩家前方的 z, x)`。
+##
+## 反解：水平方向 = (sin a, -cos a) 要等于 (cos b, sin b)，
+## 于是 a = atan2(cos b, -sin b)。
+##
+## 为什么要反解而不是直接写死一个角度：太阳必须在**弥勒背后**，
+## 而弥勒的位置是 mirage.gd 里的一串常量（CITY_HALF / STATUE_FRONT_OF_WALL /
+## STATUE_SIDE）。哪天像挪了 200 m，写死的方位角就会悄悄偏掉几度，
+## 而"偏几度"在画面上完全看不出来——只有那一层逆光没了。
+func set_sun_behind_bearing(bearing_deg: float) -> void:
+	var b := deg_to_rad(bearing_deg)
+	sun_azimuth_deg = fposmod(rad_to_deg(atan2(cos(b), -sin(b))), 360.0)
+	_apply_sun()
