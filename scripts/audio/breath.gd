@@ -37,6 +37,14 @@ func _ready() -> void:
 	gen.buffer_length = BUFFER_LENGTH
 	stream = gen
 	volume_db = BASE_DB
+	if OS.has_feature("web"):
+		# 现场合成的流**只能走 Stream**：sample 播放要求整条流能预先解成
+		# AudioBuffer，生成器给不出来（引擎会直接丢掉这条流，只在控制台留
+		# 一句 "trying to play a sample from a stream that cannot be sampled"）。
+		# 也就是说这一层留在 Godot 混音器上——web 上那是主线程。余量由
+		# project.godot 的 `audio/driver/output_latency.web=100` 撑：喘气是连续的
+		# 氛围声，偶尔丢一个 quantum 听不出来，被拖慢才听得出来。
+		playback_type = AudioServer.PLAYBACK_TYPE_STREAM
 	play()
 	_playback = get_stream_playback() as AudioStreamGeneratorPlayback
 

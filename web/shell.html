@@ -1,0 +1,357 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+	<meta charset="utf-8">
+	<meta name="viewport" content="width=device-width, user-scalable=no, initial-scale=1.0">
+	<title>$GODOT_PROJECT_NAME</title>
+	<style>
+html, body, #canvas {
+	margin: 0;
+	padding: 0;
+	border: 0;
+}
+
+body {
+	color: white;
+	background-color: $GODOT_SPLASH_COLOR;
+	overflow: hidden;
+	touch-action: none;
+}
+
+#canvas {
+	display: block;
+}
+
+#canvas:focus {
+	outline: none;
+}
+
+/* 加载页。**整层不吃点击**（pointer-events: none）：鼠标锁定要由 canvas 收到
+   mousedown 才能在浏览器里申请下来（见 docs 的 "Full screen and mouse capture"），
+   挡住的不是进度条，是玩家第一次点击。 */
+#status {
+	position: absolute;
+	left: 0;
+	right: 0;
+	top: 0;
+	bottom: 0;
+	background-color: $GODOT_SPLASH_COLOR;
+	display: flex;
+	flex-direction: column;
+	justify-content: center;
+	align-items: center;
+	pointer-events: none;
+	transition: opacity 0.8s ease;
+}
+
+#status.done {
+	opacity: 0;
+}
+
+#status-splash {
+	max-height: 100%;
+	max-width: 100%;
+	margin: auto;
+}
+
+#status-splash.show-image--false {
+	display: none;
+}
+
+#status-splash.fullsize--true {
+	height: 100%;
+	width: 100%;
+	object-fit: contain;
+}
+
+#status-splash.use-filter--false {
+	image-rendering: pixelated;
+}
+
+/* 题记叠在画面上：上面一行是名字，中间一句原文，下面标出处。 */
+#status-caption {
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 13.5%;
+	padding: 1.6rem 0 1.1rem;
+	text-align: center;
+	color: #f6e8cd;
+	background: radial-gradient(ellipse 60% 100% at 50% 55%, rgba(16, 8, 3, 0.62) 0%, rgba(16, 8, 3, 0.34) 55%, rgba(16, 8, 3, 0) 100%);
+}
+
+#status-caption b {
+	display: block;
+	font: 600 30px/1.35 'Noto Serif SC', 'Songti SC', 'SimSun', serif;
+	letter-spacing: 0.36em;
+	text-indent: 0.36em;
+	text-shadow: 0 1px 2px rgba(0, 0, 0, 0.95), 0 6px 22px rgba(0, 0, 0, 0.85);
+}
+
+#status-caption em {
+	display: block;
+	margin-top: 0.75rem;
+	font: normal 15px/1.7 'Noto Serif SC', 'Songti SC', 'SimSun', serif;
+	letter-spacing: 0.12em;
+	color: #f0dcba;
+	text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95), 0 4px 16px rgba(0, 0, 0, 0.9);
+}
+
+#status-caption i {
+	display: block;
+	margin-top: 0.5rem;
+	font: normal 12px/1.4 'Noto Serif SC', 'Songti SC', 'SimSun', serif;
+	letter-spacing: 0.2em;
+	color: #d0b28a;
+	text-shadow: 0 1px 3px rgba(0, 0, 0, 0.95), 0 4px 14px rgba(0, 0, 0, 0.9);
+}
+
+/* 进度条自己画：<progress> 的原生样式各浏览器不一，而且我们要控制"什么时候算满"。 */
+#status-bar {
+	position: absolute;
+	left: 25%;
+	right: 25%;
+	bottom: 10%;
+	height: 6px;
+	border-radius: 3px;
+	background: rgba(242, 224, 194, 0.16);
+	overflow: hidden;
+}
+
+#status-bar-fill {
+	display: block;
+	height: 100%;
+	width: 0;
+	border-radius: 3px;
+	background: linear-gradient(90deg, #b8763a, #f0d29a);
+	transition: width 0.25s linear;
+}
+
+#status-hint {
+	position: absolute;
+	left: 50%;
+	bottom: 4.5%;
+	transform: translateX(-50%);
+	color: #f6e7cd;
+	background: rgba(28, 14, 6, 0.6);
+	border: 1px solid rgba(246, 231, 205, 0.32);
+	border-radius: 0.6rem;
+	padding: 0.55rem 1.05rem;
+	font: 15px/1.5 'Noto Sans', 'Microsoft YaHei', Arial, sans-serif;
+	letter-spacing: 0.02em;
+	text-align: center;
+	transition: opacity 0.8s ease;
+}
+
+#status-hint.gone {
+	opacity: 0;
+}
+
+#status-notice {
+	display: none;
+	position: absolute;
+	left: 0;
+	right: 0;
+	bottom: 20%;
+	background-color: #5b3943;
+	border-radius: 0.5rem;
+	border: 1px solid #9b3943;
+	color: #e0e0e0;
+	font-family: 'Noto Sans', 'Droid Sans', Arial, sans-serif;
+	line-height: 1.3;
+	margin: 0 2rem;
+	overflow: hidden;
+	padding: 1rem;
+	text-align: center;
+	z-index: 1;
+}
+	</style>
+	$GODOT_HEAD_INCLUDE
+	<script>
+// 浏览器的自动播放策略：AudioContext 在用户手势之前一律是 suspended。
+// 引擎自己会在收到输入时恢复一次，但**玩家的第一次点击常常发生在加载页上**
+// （页面上就写着"点击画面开始"），那一下还没建出音频上下文，等于白按；
+// 之后他可能就一直看着画面，听不见任何声音。
+//
+// 所以这里在**每一次**手势上都补一下：suspend 的就 resume，已经 running 的
+// 什么都不做。必须在引擎脚本之前打这个补丁——它要包住 AudioContext 的构造。
+(function () {
+	const RealContext = window.AudioContext || window.webkitAudioContext;
+	if (!RealContext) {
+		return;
+	}
+	const contexts = [];
+	function PatchedAudioContext(...args) {
+		const ctx = new RealContext(...args);
+		contexts.push(ctx);
+		return ctx;
+	}
+	PatchedAudioContext.prototype = RealContext.prototype;
+	window.AudioContext = PatchedAudioContext;
+	function nudge() {
+		contexts.forEach(function (ctx) {
+			if (ctx.state !== 'running') {
+				ctx.resume();
+			}
+		});
+	}
+	window.addEventListener('pointerdown', nudge, true);
+	window.addEventListener('keydown', nudge, true);
+	window.addEventListener('touchstart', nudge, true);
+})();
+	</script>
+</head>
+<body>
+	<canvas id="canvas">
+		Your browser does not support the canvas tag.
+	</canvas>
+
+	<noscript>
+		Your browser does not support JavaScript.
+	</noscript>
+
+	<div id="status">
+		<img id="status-splash" class="$GODOT_SPLASH_CLASSES" src="$GODOT_SPLASH" alt="">
+		<div id="status-caption">
+			<b>西行·玄奘</b>
+			<em>「沙则流漫，聚散随风，人行无迹，遂多迷路。」</em>
+			<i>——《大唐西域记》卷十二 · 大流沙</i>
+		</div>
+		<div id="status-bar"><span id="status-bar-fill"></span></div>
+		<div id="status-hint">点击画面开始　·　WASD 行走　·　鼠标转视角</div>
+		<div id="status-notice"></div>
+	</div>
+
+	<script src="$GODOT_URL"></script>
+	<script>
+const GODOT_CONFIG = $GODOT_CONFIG;
+const GODOT_THREADS_ENABLED = $GODOT_THREADS_ENABLED;
+const engine = new Engine(GODOT_CONFIG);
+
+(function () {
+	const statusOverlay = document.getElementById('status');
+	const barFill = document.getElementById('status-bar-fill');
+	const statusHint = document.getElementById('status-hint');
+	const statusNotice = document.getElementById('status-notice');
+	const startedAt = Date.now();
+	let revealing = false;
+	let firstFrame = false;
+
+	// **进度条只跑到 90%。**
+	//
+	// 引擎给的数只是"下载了多少"：它到 100% 的时候，场景还没建起来——地形要
+	// 生成、着色器要编译、第一帧要真的画出来。上一版进度条冲到顶之后还要黑着屏
+	// 等好几秒，进度条就成了骗人的东西，而它本来是用来安人心的。
+	// 剩下 10% 留给 scripts/main.gd 的第一帧信号（见下面的 __godotFrameReady）。
+	const DOWNLOAD_SHARE = 0.9;
+
+	function setProgress(fraction) {
+		const clamped = Math.max(0, Math.min(fraction, 1));
+		barFill.style.width = (clamped * 100).toFixed(1) + '%';
+	}
+
+	function reveal() {
+		if (revealing) {
+			return;
+		}
+		revealing = true;
+		setProgress(1);
+		statusHint.classList.add('gone');
+		statusOverlay.classList.add('done');
+		setTimeout(function () {
+			if (statusOverlay.parentNode) {
+				statusOverlay.parentNode.removeChild(statusOverlay);
+			}
+		}, 900);
+	}
+
+	// 游戏画出第一帧时由 GDScript 调进来（web 上的 JavaScriptBridge）。
+	window.__godotFrameReady = function () {
+		firstFrame = true;
+		reveal();
+	};
+
+	// 安全阀：引擎起不来、或者第一帧迟迟不来时，别让加载页永远盖着画面。
+	// 用户按下任意键也算"我要开始了"，交给引擎自己处理。
+	setInterval(function () {
+		if (firstFrame) {
+			return;
+		}
+		if (Date.now() - startedAt > 120000) {
+			reveal();
+		}
+	}, 500);
+
+	function setStatusNotice(text) {
+		while (statusNotice.lastChild) {
+			statusNotice.removeChild(statusNotice.lastChild);
+		}
+		text.split('\n').forEach(function (line) {
+			statusNotice.appendChild(document.createTextNode(line));
+			statusNotice.appendChild(document.createElement('br'));
+		});
+	}
+
+	function displayFailureNotice(err) {
+		console.error(err);
+		if (err instanceof Error) {
+			setStatusNotice(err.message);
+		} else if (typeof err === 'string') {
+			setStatusNotice(err);
+		} else {
+			setStatusNotice('An unknown error occurred.');
+		}
+		statusNotice.style.display = 'block';
+		statusHint.classList.add('gone');
+	}
+
+	const missing = Engine.getMissingFeatures({
+		threads: GODOT_THREADS_ENABLED,
+	});
+
+	if (missing.length !== 0) {
+		if (GODOT_CONFIG['serviceWorker'] && GODOT_CONFIG['ensureCrossOriginIsolationHeaders'] && 'serviceWorker' in navigator) {
+			let serviceWorkerRegistrationPromise;
+			try {
+				serviceWorkerRegistrationPromise = navigator.serviceWorker.getRegistration();
+			} catch (err) {
+				serviceWorkerRegistrationPromise = Promise.reject(new Error('Service worker registration failed.'));
+			}
+			// There's a chance that installing the service worker would fix the issue
+			Promise.race([
+				serviceWorkerRegistrationPromise.then((registration) => {
+					if (registration != null) {
+						return Promise.reject(new Error('Service worker already exists.'));
+					}
+					return registration;
+				}).then(() => engine.installServiceWorker()),
+				// For some reason, `getRegistration()` can stall
+				new Promise((resolve) => {
+					setTimeout(() => resolve(), 2000);
+				}),
+			]).then(() => {
+				// Reload if there was no error.
+				window.location.reload();
+			}).catch((err) => {
+				console.error('Error while registering service worker:', err);
+			});
+		} else {
+			const missingMsg = 'Error\nThe following features required to run Godot projects on the Web are missing:\n';
+			displayFailureNotice(missingMsg + missing.join('\n'));
+		}
+	} else {
+		engine.startGame({
+			'onProgress': function (current, total) {
+				if (current > 0 && total > 0) {
+					setProgress((current / total) * DOWNLOAD_SHARE);
+				}
+			},
+		}).then(() => {
+			// 引擎已经跑起来了，但**这一句不等于画面已经出来**：
+			// 收尾交给第一帧信号（或上面的安全阀）。
+		}, displayFailureNotice);
+	}
+}());
+	</script>
+</body>
+</html>

@@ -30,6 +30,9 @@ extends Node3D
 @export var ground_size := 4096.0
 ## 每边分段数。
 @export var ground_segments := 512
+## 沙面基色。从 `_sand_material()` 里提出来，是因为它现在有两个读点：
+## 材质（shader 的 sand_albedo）和测试（"这片沙还是不是那个沙色"）。
+const SAND_ALBEDO := Color(0.80, 0.58, 0.34)
 
 @export_group("太阳")
 ## 低角度是关键：太阳越高，沙丘越平，影子越短，画面越像儿童插画。
@@ -63,7 +66,7 @@ var _environment: Environment
 var _sun: DirectionalLight3D
 var _sky_material: ShaderMaterial
 var _terrain: MeshInstance3D
-var _sand_mat: StandardMaterial3D
+var _sand_mat: ShaderMaterial
 
 
 func _ready() -> void:
@@ -191,41 +194,41 @@ func _build_terrain() -> void:
 	add_child(_terrain)
 
 
-func _sand_material() -> StandardMaterial3D:
+## 沙面的材质。**唯一的沙面材质**，`set_wind` 改的也是它。
+##
+## 颜色和粗糙度写在 shader 的 uniform 里（不在这里），只有两处覆盖：
+## 一是 CULL_DISABLED（三角形绕序在这个项目里没单独验证过，法线是自己算的，
+## 只要面能看见光照就是对的），二是风向——沙纹垂直于它。
+func _sand_material() -> ShaderMaterial:
 	if _sand_mat != null:
 		return _sand_mat
-	var mat := StandardMaterial3D.new()
-	mat.albedo_color = Color(0.80, 0.58, 0.34)
-	mat.roughness = 0.95
-	mat.metallic = 0.0
-	# 三角形绕序在这个项目里没有单独验证过，先不剔除背面：
-	# 法线是我们自己算的，只要面能看见，光照就是对的。
-	mat.cull_mode = BaseMaterial3D.CULL_DISABLED
 
-	# 风纹：程序化法线贴图。没有它，沙丘就是一块光滑的塑料。
-	# 纹理异步生成，头几帧可能还没就绪，之后会自动换上。
-	# 波长要和 uv1_scale 一起看：uv1_scale 4.0 × 顶点 uv(x*0.25) = 1 m 一贴，
-	# frequency 4.0 就是每米约四道纹（25 cm），正好是脚下沙面该有的尺度。
-	var ripple := FastNoiseLite.new()
-	ripple.noise_type = FastNoiseLite.TYPE_PERLIN
-	ripple.frequency = 4.0
-	ripple.fractal_octaves = 4
-	ripple.fractal_gain = 0.5
-	var ripple_tex := NoiseTexture2D.new()
-	ripple_tex.noise = ripple
-	ripple_tex.width = 1024
-	ripple_tex.height = 1024
-	ripple_tex.seamless = true
-	ripple_tex.as_normal_map = true
-	ripple_tex.bump_strength = 4.5
+	# 风纹**不再是法线贴图**，改成 shaders/sand_ground.gdshader 里的解析沙纹。
+	# 上一版这里挂的是一张 25 cm 的 Perlin 法线贴图，在逆光下等于不存在
+	# （逆光里漫反射对法线几乎不敏感），而且它是各向同性的——怎么调都不像
+	# "风做的"。新 shader 的注释里写着为什么：**脊线要有走向、沟里要有暗**。
+	# 顺带把一张 1024² 的异步噪声纹理也去掉了（它首帧还没就绪，
+	# 而"首帧的样子"正是截图探针要拍的东西——异步素材和探针天生打架）。
+	var shader_mat := ShaderMaterial.new()
+	shader_mat.shader = load("res://shaders/sand_ground.gdshader")
+	shader_mat.set_shader_parameter("sand_albedo", SAND_ALBEDO)
+	shader_mat.set_shader_parameter("sand_roughness", 0.95)
+	shader_mat.set_shader_parameter("wind_dir", Vector2(1.0, 0.35).normalized())
+	shader_mat.set_shader_parameter("wind_force", 0.0)
+	_sand_mat = shader_mat
+	return shader_mat
 
-	mat.normal_enabled = true
-	mat.normal_texture = ripple_tex
-	mat.normal_scale = 1.4
-	# 顶点 UV 是 x*0.25，再乘 4 → 约 1 m 一个风纹周期
-	mat.uv1_scale = Vector3(4.0, 4.0, 1.0)
-	_sand_mat = mat
-	return mat
+
+## 风向与风力。**沙纹是风做的**：脊线垂直于风，风越大纹越深。
+## 和推人、歪镜头、后处理里的沙带读的是同一个数（GameState），
+## 所以"风一阵扑上来"的时候，脚下的纹也一起变——不是四套效果，是一场风。
+func set_wind(direction: Vector3, force: float) -> void:
+	if _sand_mat == null:
+		return
+	var flat := Vector2(direction.x, direction.z)
+	if flat.length_squared() > 0.000001:
+		_sand_mat.set_shader_parameter("wind_dir", flat.normalized())
+	_sand_mat.set_shader_parameter("wind_force", clampf(force, 0.0, 1.0))
 
 
 # ---------------------------------------------------------------------------

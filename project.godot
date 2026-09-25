@@ -12,8 +12,13 @@ config_version=5
 
 config/name="西行·玄奘 3D"
 config/description="塔克拉玛干第一人称：氛围优先，走、沙暴、体力、幻影。"
+config/icon="res://assets/ui/icon.png"
 run/main_scene="res://scenes/main.tscn"
 config/features=PackedStringArray("4.7", "Forward Plus")
+boot_splash/bg_color=Color(0.109, 0.066, 0.043, 1)
+boot_splash/image="res://assets/ui/splash.png"
+boot_splash/fullsize=true
+boot_splash/use_filter=true
 
 [autoload]
 
@@ -36,3 +41,30 @@ lights_and_shadows/directional_shadow/soft_shadow_filter_quality=3
 anti_aliasing/quality/msaa_3d=2
 environment/defaults/default_clear_color=Color(0.72, 0.53, 0.32, 1)
 anti_aliasing/quality/screen_space_aa=1
+; Web 上没有 Forward+/Mobile 渲染器，FXAA 那句只会在控制台刷一条警告。
+anti_aliasing/quality/screen_space_aa.web=0
+; Web 导出只支持 Compatibility（WebGL2）——Forward+ 要 WebGPU，浏览器里还不通用。
+; 这是**按平台覆盖**：桌面端仍然是 Forward+，一行都没动。
+renderer/rendering_method.web="gl_compatibility"
+
+[audio]
+
+; 播放类型。**两种取值的语义先钉死**（实测 ProjectSettings 的 hint 是
+; "Stream,Sample"）：0 = Stream（走 Godot 混音器），1 = Sample（交给浏览器
+; 原生的 AudioBufferSourceNode），节点上的 `playback_type` 多一个 0 = Default
+; （跟随本设置）。桌面和 web 都留 0 = Stream，按节点各表——见下面两条。
+;
+; Web 上 Godot 的混音器是**主线程**在跑（4.7 的 audio_driver_web.cpp：
+; 不开 Thread Support 时 `_process_callback` 就在主线程里调 `audio_server_process`，
+; 每 128 帧一个 quantum，靠 AudioWorklet 的 postMessage 往返供数据）。所以
+; "谁上混音器"在 web 上等于"谁跟渲染抢主线程"。分派原则：
+;   * BGM → **Sample**（脚本里显式指定）：浏览器自己的音频线程播，主线程不插手；
+;   * 喘气 / 风声 → **Stream**（脚本里显式指定）：AudioStreamGenerator 现场合成，
+;     只有混音器能播它们，sample 播放会把这两条流直接丢掉。
+general/default_playback_type.web=0
+
+; Web 混音缓冲：默认 50 ms，这里顶到上限 100 ms。
+; buffer_length = closest_power_of_2(latency * mix_rate / 1000)，44100 Hz 下
+; 50 ms → 2048 帧（46 ms），100 ms → 4096 帧（93 ms）。留在混音器上的那两层
+; （喘气、风声）因此多出一倍余量：主线程偶尔卡 90 ms 以内都不会丢 quantum。
+audio/driver/output_latency.web=100

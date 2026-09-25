@@ -52,6 +52,16 @@ var collapse_elapsed := -1.0
 
 ## 沙暴强度 0..1，由天气系统每帧写入，同时驱动体力消耗与能见度。
 var storm_intensity := 0.0
+## 风力 0..1：沙暴强度 **× 阵风包络**，由 Sandstorm 每帧写入。
+##
+## 和 storm_intensity 分开是因为两件事不一样：storm_intensity 是"这场沙暴
+## 有多大"（缓慢的长曲线，管雾、管耗水），wind_force 是"此刻这一阵风有多大"
+## （几秒一个来回，管推人、管镜头、管沙有多浓）。合成一个数的话，
+## 要么雾跟着阵风闪，要么风变成一条没有起伏的直线。
+var wind_force := 0.0
+## 风向（世界坐标的水平单位向量），同样是 Sandstorm 写的。
+## 镜头要按它歪、后处理要按它把沙条拉长——两边必须同一个方向。
+var wind_direction := Vector3(1.0, 0.0, 0.0)
 
 
 func reset() -> void:
@@ -61,6 +71,7 @@ func reset() -> void:
 	is_collapsed = false
 	collapse_elapsed = -1.0
 	storm_intensity = 0.0
+	wind_force = 0.0
 	stamina_changed.emit(stamina)
 
 
@@ -95,6 +106,20 @@ func add_distance(delta: float) -> void:
 ## 沙暴期间的能见度（米）。晴朗时看得见几百米外的沙脊，沙暴压顶时只剩二十来米。
 func visibility_meters() -> float:
 	return lerpf(900.0, 22.0, clampf(storm_intensity, 0.0, 1.0))
+
+
+## 幻影的浓度 0..1：**渴**和**沙暴**共同决定，不是按时间表演出。
+##
+## 累是真实存在的（体力在掉），沙暴是真实存在的，玩家能隐约意识到
+## "我越难受，它越清楚"——比定时出现可怕得多。保底 0.28 是让第一次抬头
+## 就能看见，否则玩家根本不知道有这东西。
+##
+## 这条公式原来写在 main 里（幻影节点就在 main 手里）。挪进模型层是因为
+## 它**只依赖 stamina 和 storm_intensity 两个模型层的数**，而"自言自语"
+## 那一层也要读它（幻影一出现，就该有一句关于海市蜃楼的话）——
+## 模型层没有的数，别的层只能自己再算一遍，那就成了两份真相。
+func mirage_presence() -> float:
+	return clampf(0.28 + fatigue() * 0.7 + storm_intensity * 0.6, 0.0, 1.0)
 
 
 # ---------------------------------------------------------------------------

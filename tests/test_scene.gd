@@ -23,6 +23,17 @@ func _ready() -> void:
 	await _test_main_scene_assembles()
 	_test_gait()
 	_test_storm_model()
+	_test_gust()
+	_test_wind_is_crosswind()
+	_test_wind_in_a_run()
+	_test_wind_on_the_camera()
+	_test_headwind_slows_you()
+	_test_stride_shortens_in_wind()
+	_test_mouse_step_gate()
+	_test_dust_bands_are_visible()
+	_test_grain_is_white_noise()
+	_test_soliloquy()
+	_test_wind_sound()
 	_test_ground_following()
 	_test_ground_is_big_enough()
 	_test_collapse_timeline()
@@ -371,6 +382,772 @@ func _test_storm_model() -> void:
 	GameState.reset()
 
 
+## 阵风：风不是一条稳定的曲线，是"一阵一阵"的。
+##
+## 需求方 2026-09-24 的判词是"大风吹的感觉不是很明显，视觉和行走上"。风的
+## **强度**好办（乘一个系数就行），难的是**节奏**：一条常数的风推着人走，人
+## 只会觉得"这关的速度调过了"；一阵一阵地扑上来，人才会觉得是风。
+##
+## 这里守三条：包络有上下限（不吹出界）、真的在起伏（不是常数）、
+## 风力 = 强度 × 阵风（平静时必须是 0——平静的沙漠不该有推力）。
+func _test_gust() -> void:
+	print("[阵风]")
+	var storm := Sandstorm.new()
+	var lo := INF
+	var hi := -INF
+	var sum := 0.0
+	var n := 0
+	var t := 0.0
+	while t < 240.0:
+		var g := storm.gust(t)
+		lo = minf(lo, g)
+		hi = maxf(hi, g)
+		sum += g
+		n += 1
+		t += 0.25
+	var mean := sum / float(n)
+	check(lo >= 0.5 and hi <= 1.001, "阵风包络收在 0.5~1.0（%.2f~%.2f）" % [lo, hi])
+	check(hi - lo > 0.3, "阵风真的在起伏（%.2f~%.2f，不是一条直线）" % [lo, hi])
+	check(
+		mean > 0.6 and mean < 0.95,
+		"阵风的均值在中间（%.2f）——风是「扑上来」和「缓一下」的混合" % mean
+	)
+
+	GameState.reset()
+	storm.intensity = 0.0
+	check(is_equal_approx(storm.wind_force(), 0.0), "平静时没有风（0.0）")
+	storm.intensity = 1.0
+	storm._clock = 0.0
+	var f0 := storm.wind_force()
+	storm._clock = 7.0
+	var f1 := storm.wind_force()
+	check(f0 > 0.4 and f1 > 0.4, "沙暴里一直有风（%.2f / %.2f）" % [f0, f1])
+	check(not is_equal_approx(f0, f1), "风的大小每一刻都不一样（%.2f → %.2f）" % [f0, f1])
+	storm.free()
+	GameState.reset()
+
+
+## 风推在人身上：**横着抽**才是风，顺风只是走得快。
+##
+## 上一版的风向 (1, 0.35) 和"走向弥勒"只差 19°，那股 2.6 m/s 的推力绝大部分
+## 变成了顺风加速——玩家读不出"被风吹"。所以这条测试量的是**方向**：
+## 横向分量必须是纵向分量的两倍以上。
+func _test_wind_is_crosswind() -> void:
+	print("[风是横着抽的]")
+	var storm := Sandstorm.new()
+	var wind := storm.wind_direction
+	check(
+		is_equal_approx(wind.y, 0.0),
+		"风是水平的（y = %.2f）——竖直分量会让沙往天上飞" % wind.y
+	)
+	# 玩家默认朝 +X 走：纵向 = x，横向 = z。
+	check(
+		absf(wind.z) > absf(wind.x) * 2.0,
+		"风是横着抽过来的（横向 %.2f vs 纵向 %.2f）——顺风只让人走得快，不叫风"
+		% [absf(wind.z), absf(wind.x)]
+	)
+	check(wind.x < 0.0, "带一点点逆风（%.2f < 0）——顶着风走脚下会慢一点" % wind.x)
+	check(absf(wind.length() - 1.0) < 0.001, "风向是单位向量")
+
+	# 推力：峰值要够大（人真的被推着走），而且方向就是这个风向。
+	storm.force_intensity(1.0)
+	storm._clock = 2.0
+	var player := Wanderer.new()
+	add_child(player)
+	player.set_physics_process(false)
+	storm.player = player
+	storm._apply()
+	var push := player.external_push
+	check(
+		push.length() > 1.5,
+		"推力的量级够（%.2f m/s）——小于半个步速就只是「有点飘」" % push.length()
+	)
+	check(
+		absf(push.z) > absf(push.x) * 2.0,
+		"推力也是横着推的（横向 %.2f vs 纵向 %.2f m/s）" % [absf(push.z), absf(push.x)]
+	)
+	check(
+		GameState.wind_force > 0.4,
+		"风力写进了 GameState（%.2f）——镜头那一侧读的就是它" % GameState.wind_force
+	)
+	player.queue_free()
+	storm.free()
+	GameState.reset()
+
+
+## 风里的一局：被吹得走不直，但**还翻得过四道沙丘**。
+##
+## 这是"大风吹"和"三分钟四道沙丘"两条需求撞在一起的地方：风要是给太大，
+## 人就被吹在原地打转，一局翻不过四道脊——前面那条 [体力契约] 会绿着，
+## 因为它压根没把风算进去。所以这里把真实的推力也代进去走一局。
+func _test_wind_in_a_run() -> void:
+	print("[风里的一局]")
+	var field := DuneField.new()
+	var walk := 2.6
+	var start := field.find_viewpoint()
+	GameState.reset()
+	var player := Wanderer.new()
+	add_child(player)
+	player.set_physics_process(false)
+	var storm := Sandstorm.new()
+	storm.player = player
+
+	var t := 0.0
+	var step := 0.05
+	var x := start.x
+	var z := start.y
+	var drift := 0.0
+	var peak := 0.0
+	var scale_sum := 0.0
+	var samples := 0
+	while not GameState.is_collapsed and t < 900.0:
+		storm.advance(step)
+		var push := player.external_push
+		peak = maxf(peak, push.length())
+		# 玩家一直朝 +X 走（对着弥勒），风一直在推他——推出来的横向位移
+		# 就是"走不成直线"这件事的读数。
+		#
+		# 步速也要过一遍**风里的阻力**（Wanderer.wind_speed_scale）：顶着风走
+		# 脚下是会慢的，这一条现在也是"三分钟、四道沙丘"的一部分——
+		# 少了它，测试里走的一局会比玩家真走的那一局更远，契约就成了空头支票。
+		var wish := Vector3(1.0, 0.0, 0.0)
+		var scale := Wanderer.wind_speed_scale(storm.wind_direction, GameState.wind_force, wish)
+		scale_sum += scale
+		x += (walk * scale + push.x) * step
+		z += push.z * step
+		drift = maxf(drift, absf(z - start.y))
+		GameState.tick(step, 0.0)
+		GameState.add_distance(walk * scale * step)
+		samples += 1
+		t += step
+
+	var crests := _count_crests(field, start.x, x, z)
+	var mean_scale := scale_sum / float(maxi(samples, 1))
+	print(
+		"  （实测：%.0f s 倒下，往前 %.0f m、被吹偏 %.0f m，翻过 %d 道沙脊，推力峰值 %.1f m/s，顶风把步速拖到平均 %.3f 倍）"
+		% [t, x - start.x, drift, crests, peak, mean_scale]
+	)
+	check(drift > 25.0, "风把人吹得走不直（横向漂了 %.0f m）" % drift)
+	check(
+		crests >= 4,
+		"顶着风还是翻过了 4 道沙脊（实测 %d 道，往前 %.0f m）" % [crests, x - start.x]
+	)
+	check(peak > 2.0, "推力峰值够大（%.1f m/s）" % peak)
+	check(
+		mean_scale < 0.995,
+		"顶风真的拖了后腿（一局平均 %.3f 倍步速）——不是只有位移被推" % mean_scale
+	)
+	player.queue_free()
+	storm.free()
+	GameState.reset()
+
+
+## 风推在**镜头**上：脑袋被吹偏、地平线被吹斜、而且还在抖。
+##
+## 走路那一半（推力）由上面的 [风里的一局] 守着；这一条守视觉那一半。
+## 两者是同一阵风的两面，所以读的是同一个 `GameState.wind_force`——
+## 分开算的话会出现"人被推了一下、镜头却没动"。
+##
+## 量的都是**幅度**，不是"好不好看"：镜头不偏、地平线不歪，就是上一版那副
+## 样子（需求方原话："大风吹的感觉不是很明显"）。
+func _test_wind_on_the_camera() -> void:
+	print("[风推在镜头上]")
+	var player := Wanderer.new()
+	add_child(player)
+	# 引擎自己的物理帧会把速度拉回 0，和这里的推进打架（和 [步态] 同一个理由）。
+	player.set_physics_process(false)
+	player.set_yaw(-PI * 0.5)  # 和 main.START_YAW 一致：面朝 +X（朝着弥勒）
+	GameState.reset()
+
+	# 无风：镜头必须是干净的。这一步是"上一条测试没被别的东西污染"的对照。
+	GameState.wind_force = 0.0
+	GameState.wind_direction = Vector3(0.0, 0.0, 1.0)
+	var calm_x := 0.0
+	var calm_roll := 0.0
+	for i in range(120):
+		player._update_camera(1.0 / 60.0, 0.0, false)
+		calm_x = maxf(calm_x, absf(player.camera().position.x))
+		calm_roll = maxf(calm_roll, absf(player.camera().rotation.z))
+	check(calm_x < 0.01, "没风时镜头不偏（最大 %.3f m）" % calm_x)
+	check(calm_roll < deg_to_rad(0.2), "没风时地平线是平的（最大 %.2f°）" % rad_to_deg(calm_roll))
+
+	# 横风拉满：面朝 +X 时 +Z 就是右手边，所以"横向分量 = +1"。
+	GameState.wind_force = 1.0
+	var x_lo := INF
+	var x_hi := -INF
+	var roll := 0.0
+	for i in range(900):
+		player._update_camera(1.0 / 60.0, 0.0, false)
+		var px := player.camera().position.x
+		x_lo = minf(x_lo, px)
+		x_hi = maxf(x_hi, px)
+		roll = maxf(roll, absf(player.camera().rotation.z))
+	check(
+		x_hi > Wanderer.WIND_LEAN_METERS * 0.9,
+		"脑袋被吹向下风侧（%.3f m，标尺 %.2f）" % [x_hi, Wanderer.WIND_LEAN_METERS]
+	)
+	check(
+		rad_to_deg(roll) > 2.5,
+		"地平线被吹斜（峰值 %.2f°，标尺 %.1f°）" % [rad_to_deg(roll), Wanderer.WIND_ROLL_DEG]
+	)
+	check(
+		x_hi - x_lo > 0.03,
+		"风在抖，不是钉死的一个偏移（摆动幅度 %.3f m）" % (x_hi - x_lo)
+	)
+	player.queue_free()
+	GameState.reset()
+
+
+## 顶着风走，**脚下要有阻力**。
+##
+## 只验方向，不验"好不好玩"：风顺着你吹时略快、顶着你吹时明显慢、横着吹时
+## 一点不吃速度（横风吃的是站位，那是 Sandstorm 的位移推力，上面两条测试守着）。
+## 这一条是"行走那一半"的读数——上一版只有被动位移，玩家按着前进时脚下
+## 是空的，"被平移了半个身位"和"走不动"是两回事。
+func _test_headwind_slows_you() -> void:
+	print("[顶风走得慢]")
+	var i := Vector3(1.0, 0.0, 0.0)
+	var side := Vector3(0.0, 0.0, 1.0)
+
+	check(
+		is_equal_approx(Wanderer.wind_speed_scale(i, 0.0, i), 1.0),
+		"没风时步速不变（乘 1.0）"
+	)
+	# 风往 +X 吹：**朝 +X 走是顺风**（风在后背），朝 -X 走才是顶风。
+	# 上一版这条测试把两头写反了，断言全红——写反的不是代码，是"顶风"这两个字。
+	var tail := Wanderer.wind_speed_scale(i, 1.0, i)
+	var head := Wanderer.wind_speed_scale(i, 1.0, -i)
+	var across := Wanderer.wind_speed_scale(i, 1.0, side)
+	check(head < 0.90, "满风顶着头走要慢下来（乘 %.2f）" % head)
+	check(tail > 1.0, "顺风才借得上力（乘 %.2f）" % tail)
+	check(
+		tail - 1.0 < 1.0 - head,
+		"借到的比输掉的少（顺风 +%.2f vs 顶风 -%.2f）——风能推着你走，推不了你的腿"
+		% [tail - 1.0, 1.0 - head]
+	)
+	check(absf(across - 1.0) < 0.001, "横风不吃速度（乘 %.2f）——它吃的是站位" % across)
+	check(
+		Wanderer.wind_speed_scale(i, 0.5, -i) > head + 0.05,
+		"风越小阻力越小（半风 %.2f > 满风 %.2f）"
+		% [Wanderer.wind_speed_scale(i, 0.5, -i), head]
+	)
+
+	# 默认那阵风 (-0.22, 0, 0.98) 里，逆风只有 22%——玩家朝弥勒走（+X）时
+	# 该慢一点，但不该慢到翻不过四道沙丘。这两个数是绑在一起的，见 WIND_DRAG。
+	var storm := Sandstorm.new()
+	var real := Wanderer.wind_speed_scale(storm.wind_direction, 1.0, i)
+	print("  （默认风、满风力、朝着弥勒走：步速乘 %.3f）" % real)
+	check(real < 0.95, "默认风里朝着弥勒走确实费劲（乘 %.3f）" % real)
+	check(real > 0.88, "但没有费劲到把「三分钟四道沙丘」吃掉（乘 %.3f）" % real)
+	storm.free()
+
+
+## 鼠标那一道闸门。
+##
+## **必须在这里量**：真正吃它的分支在 `_unhandled_input` 里，而那个分支要求
+## `Input.mouse_mode == CAPTURED`——headless 没有窗口系统，拿不到指针锁定，
+## 那条分支永远跑不到。测不到的分支等于没写，所以把闸门抽成了纯函数。
+##
+## 量三件事：小位移原样过（不伤口感）、离谱位移被按在上限（不会一帧顶到穹顶）、
+## 连续事件叠起来仍然能扫满一圈（闸门不是把视角锁死）。
+func _test_mouse_step_gate() -> void:
+	print("[鼠标步长闸门]")
+	var small := Vector2(12.0, -7.0)
+	check(
+		Wanderer.limit_look_step(small).is_equal_approx(small),
+		"手正常的一点点位移原样过（%s）" % Wanderer.limit_look_step(small)
+	)
+
+	var absurd := Vector2(4000.0, -3000.0)
+	var gated := Wanderer.limit_look_step(absurd)
+	check(
+		is_equal_approx(gated.length(), Wanderer.MOUSE_STEP_LIMIT),
+		"离谱的一次位移被按到 %.0f 像素（原来是 %.0f）" % [
+			Wanderer.MOUSE_STEP_LIMIT, absurd.length()
+		]
+	)
+
+	var player := Wanderer.new()
+	var per_event_deg := rad_to_deg(Wanderer.MOUSE_STEP_LIMIT * player.mouse_sensitivity)
+	check(
+		per_event_deg < rad_to_deg(player.pitch_limit),
+		"一次事件最多转 %.1f°，到不了 pitch 钳位 %.0f°——抬不到穹顶" % [
+			per_event_deg, rad_to_deg(player.pitch_limit)
+		]
+	)
+
+	var frames := 0
+	var yaw := 0.0
+	while frames < 120 and absf(yaw) < TAU:
+		yaw -= Wanderer.limit_look_step(Vector2(Wanderer.MOUSE_STEP_LIMIT * 4.0, 0.0)).x \
+				* player.mouse_sensitivity
+		frames += 1
+	check(
+		absf(yaw) >= TAU,
+		"%d 帧扫过一整圈——闸门限的是单次事件，不是把视角锁死" % frames
+	)
+	check(
+		Wanderer.CAPTURE_GRACE_MS >= 50 and Wanderer.CAPTURE_GRACE_MS <= 500,
+		"抓取宽限窗口是 %d ms（够长到跨过「指针被挪到窗口中央」那一跳，"
+		% Wanderer.CAPTURE_GRACE_MS
+		+ "又不至于让玩家点完半天转不了头）"
+	)
+	player.free()
+
+
+## 风里步子要**变碎**：只改步频，不改位移。
+##
+## 位移是 speed 说了算，步长只决定"这一步跨多大"——满风时步长缩 15%，
+## 同样的速度就会多踩约 18% 的步子。这是"顶着风走"最便宜的一条身体语言：
+## 不用改模型，只改相位推进的速度。
+func _test_stride_shortens_in_wind() -> void:
+	print("[风里步子更碎]")
+	var player := Wanderer.new()
+	add_child(player)
+	player.set_physics_process(false)
+	GameState.reset()
+	var dt := 1.0 / 60.0
+	var seconds := 10.0
+	var frames := int(seconds / dt)
+
+	GameState.wind_force = 0.0
+	var calm_from := player._step_index
+	for i in range(frames):
+		player._update_camera(dt, player.walk_speed, false)
+	var calm := player._step_index - calm_from
+
+	GameState.wind_force = 1.0
+	var windy_from := player._step_index
+	for i in range(frames):
+		player._update_camera(dt, player.walk_speed, false)
+	var windy := player._step_index - windy_from
+
+	print("  （同样 %.0f 秒、同样 %.1f m/s：无风 %d 步，满风 %d 步）" % [seconds, player.walk_speed, calm, windy])
+	check(calm > 15, "无风时步频正常（%d 步 / %.0f s）" % [calm, seconds])
+	check(
+		windy > calm * 1.12 and windy < calm * 1.4,
+		"满风时步子变碎（%d 步 vs %d 步）——位移没变，只多踩了几步" % [windy, calm]
+	)
+	player.queue_free()
+	GameState.reset()
+
+
+## 从 shader 源码里读一个 `uniform float` 的默认值。
+##
+## **不另抄一份常数**：抄一份就会漂——shader 改了、测试里的副本没改，
+## 于是测试绿着、画面对不上，而这正是最难查的那类问题。
+func _shader_float(code: String, name: String) -> float:
+	var re := RegEx.new()
+	re.compile("uniform float %s[^=]*= *([0-9.]+)" % name)
+	var m := re.search(code)
+	if m == null:
+		check(false, "shader 里找不到 uniform %s（改名了？）" % name)
+		return NAN
+	return float(m.get_string(1))
+
+
+## 和 shader 里 `_hash` / `_vnoise` / `_fbm` 逐行对应的副本。
+##
+## 分布在**统计意义**上是对的就行：GLSL 和 GDScript 的 sin 末位不同，
+## 逐点对比本来就不可能相等，这一节量的是均值、标准差和覆盖面积。
+func _dust_fbm(p: Vector2) -> float:
+	var v := 0.0
+	var amp := 0.5
+	for i in range(4):
+		var i_cell := Vector2(floorf(p.x), floorf(p.y))
+		var f := p - i_cell
+		f = Vector2(f.x * f.x * (3.0 - 2.0 * f.x), f.y * f.y * (3.0 - 2.0 * f.y))
+		var c00 := fposmod(sin(i_cell.dot(Vector2(127.1, 311.7))) * 43758.5453, 1.0)
+		var c10 := fposmod(sin((i_cell + Vector2(1.0, 0.0)).dot(Vector2(127.1, 311.7))) * 43758.5453, 1.0)
+		var c01 := fposmod(sin((i_cell + Vector2(0.0, 1.0)).dot(Vector2(127.1, 311.7))) * 43758.5453, 1.0)
+		var c11 := fposmod(sin((i_cell + Vector2(1.0, 1.0)).dot(Vector2(127.1, 311.7))) * 43758.5453, 1.0)
+		v += amp * lerpf(lerpf(c00, c10, f.x), lerpf(c01, c11, f.x), f.y)
+		# 八度之间转 37°：四个八度共用一套格点的话，"沙云"会先露出方格。
+		p = Vector2(p.x * 0.80 - p.y * 0.60, p.x * 0.60 + p.y * 0.80) * 2.07
+		amp *= 0.5
+	return v
+
+
+## 风推在**沙**上：这一层"一直飘着的沙带"到底看不看得见？
+##
+## 这是本仓库里最难用眼睛发现的一类 bug：**一层画不出来的沙**。
+## 2026-09-24 就是这么栽的——门槛写在 fbm 的 +1σ 以外，画面上一个像素都够不着，
+## 而"看不见"和"没写"在截图上是同一个样子，靠看图 review 根本抓不住。
+##
+## 所以这一节不看图、不调参数，**照着 shader 源码里的常数算一遍分布**：
+## 抠出 ①噪声的均值/标准差（那句按 σ 归一化的式子）②σ 门槛 ③采样频率，
+## 再用同一套噪声量一次覆盖面积。任何一边被改歪（门槛挪进尾巴、
+## 归一化的常数和噪声对不上），这条就会红。
+##
+## 量的都是**平静那一档**（拖影长度 = 0，两次取样完全重合），再加一次
+## "满风时拖影会不会把沙带抹平"的对照——拖影是这一层新加的东西，
+## 它最容易犯的错不是不够，而是**糊成一团、带全没了**。
+func _test_dust_bands_are_visible() -> void:
+	print("[风里的沙带看得见吗]")
+	var shader := load("res://shaders/desert_post.gdshader") as Shader
+	check(shader != null, "后处理 shader 能加载")
+	if shader == null:
+		return
+	var code := shader.code
+
+	# ① "z 分数"那句：(fine * A + broad * B - 均值) / 标准差
+	var z_re := RegEx.new()
+	z_re.compile("\\(fine \\* ([0-9.]+) \\+ broad \\* ([0-9.]+) - ([0-9.]+)\\) / ([0-9.]+)")
+	var z := z_re.search(code)
+	check(z != null, "shader 里有那句按 σ 归一化的式子（式子重写了这条也要跟着改）")
+	if z == null:
+		return
+	var w_fine := float(z.get_string(1))
+	var w_broad := float(z.get_string(2))
+	var claimed_mean := float(z.get_string(3))
+	var claimed_sd := float(z.get_string(4))
+
+	# ② 门槛：smoothstep(lo, hi, v)，两个数都是 σ 分数
+	var s_re := RegEx.new()
+	s_re.compile("smoothstep\\((-?[0-9.]+), (-?[0-9.]+), v\\)")
+	var s := s_re.search(code)
+	check(s != null, "shader 里有把噪声切成沙带的门槛")
+	if s == null:
+		return
+	var lo := float(s.get_string(1))
+	var hi := float(s.get_string(2))
+	check(hi > lo, "门槛是从下往上爬的（%.2fσ → %.2fσ）" % [lo, hi])
+
+	# ③ 采样频率：方位角方向压扁、仰角方向压实
+	var along := _shader_float(code, "dust_along")
+	var bands_freq := _shader_float(code, "dust_bands")
+
+	# 铺满"一屏看得到的那些方位/仰角"：水平 ±51°、竖直 ±34°（68° 的竖直视角）。
+	# 网格要够密：最细那一个八度的周期是 0.48，一行四五个采样才量得准 σ。
+	var nx := 200
+	var ny := 100
+	var count := nx * ny
+	var visible := 0
+	var core := 0
+	var storm_core := 0
+	var sum := 0.0
+	var sum_sq := 0.0
+	var storm_sum := 0.0
+	var storm_sum_sq := 0.0
+	for ix in range(nx):
+		for iy in range(ny):
+			var az := lerpf(-0.89, 0.89, float(ix) / float(nx - 1))
+			var el := lerpf(-0.59, 0.59, float(iy) / float(ny - 1))
+			var p := Vector2(az * along, el * bands_freq)
+			var fine := _dust_fbm(p)
+			var broad := _dust_fbm(p * 0.45)
+			var raw := fine * w_fine + broad * w_broad
+			var band := smoothstep(lo, hi, (raw - claimed_mean) / claimed_sd)
+			sum += raw
+			sum_sq += raw * raw
+			if band > 0.05:
+				visible += 1
+			if band > 0.9:
+				core += 1
+			# 满风时的拖影：把 fine 换成两个取样点的平均。两个点相隔约 0.5 个
+			# 特征尺度——这就是 shader 里"默认机位 + 默认横风 + 满风力"算出来的
+			# 那个偏移量（(0.98×0.40, 0.18×6.0) × 0.45）。公式改了这里也要改。
+			var smeared := (_dust_fbm(p) + _dust_fbm(p - Vector2(0.18, 0.50))) * 0.5
+			var storm_raw := smeared * w_fine + broad * w_broad
+			var storm_band := smoothstep(lo, hi, (storm_raw - claimed_mean) / claimed_sd)
+			storm_sum += storm_raw
+			storm_sum_sq += storm_raw * storm_raw
+			if storm_band > 0.9:
+				storm_core += 1
+
+	var measured_mean := sum / float(count)
+	var measured_sd := sqrt(maxf(sum_sq / float(count) - measured_mean * measured_mean, 0.0))
+	var storm_mean := storm_sum / float(count)
+	var storm_sd := sqrt(maxf(storm_sum_sq / float(count) - storm_mean * storm_mean, 0.0))
+	var visible_frac := float(visible) / float(count)
+	var core_frac := float(core) / float(count)
+	var storm_frac := float(storm_core) / float(count)
+	print(
+		"  （实测：噪声均值 %.3f / σ %.3f；薄沙 %.0f%%、实心沙丝 %.1f%%；满风 σ %.3f、实心 %.1f%%）"
+		% [
+			measured_mean, measured_sd, visible_frac * 100.0, core_frac * 100.0,
+			storm_sd, storm_frac * 100.0,
+		]
+	)
+
+	check(
+		absf(measured_mean - claimed_mean) < 0.02,
+		"归一化用的均值是真的（写 %s，实测 %.3f）" % [z.get_string(3), measured_mean]
+	)
+	check(
+		absf(measured_sd - claimed_sd) < 0.02,
+		"归一化用的标准差是真的（写 %s，实测 %.3f）" % [z.get_string(4), measured_sd]
+	)
+	check(
+		visible_frac > 0.2 and visible_frac < 0.9,
+		"大部分画面有一层薄沙（%.0f%%）——不是几根孤零零的丝" % (visible_frac * 100.0)
+	)
+	check(
+		core_frac > 0.01 and core_frac < 0.35,
+		"有实心的沙带但不是半个画面（%.1f%%）——上一版 0.50→0.68 那档是满屏硬线" % (core_frac * 100.0)
+	)
+	check(
+		storm_frac > core_frac * 0.4,
+		"满风拖影把沙带拉软了、但没抹平（%.1f%% vs 平静 %.1f%%）" % [storm_frac * 100.0, core_frac * 100.0]
+	)
+	check(
+		storm_sd <= measured_sd + 0.001,
+		"拖影只会压低起伏、不会抬高（σ %.3f → %.3f）" % [measured_sd, storm_sd]
+	)
+
+
+## 颗粒是**白噪**，不是一层布纹。
+##
+## 这一条守的是"颗粒必须真的是颗粒"。判据是**相邻像素的相关性**：
+## 白噪 ≈ 0，规则条纹 ≈ 1。
+##
+## 它还有一段来历，值得留着：2026-09-24 成片放大 1:1 时，沙面、佛像、天空上
+## 全盖着一层细网格。第一反应是 shader 里那句 `fract(sin(dot(p, k)))` 在整数
+## 像素格上退化成条纹——于是写了这一条测试，**顺手把旧写法当对照组**，
+## 满以为它会红。结果它测出 0.016：**旧的写法在 double 下是白噪，假设当场被
+## 证伪**，我一度把凶手改判成"录片的 MJPEG 压缩"。
+##
+## 那个改判也是错的。真正分开两个嫌疑的是一次 **A/B 录片**：同一个 1600×900、
+## 同一条 MJPEG 管线、同一组参数，**只换哈希**——旧哈希那版有网格，新哈希那版
+## 干净。管线一样，所以凶手还是哈希：它在 **float32** 下会退化成纲格
+## （输入 `12.9898x + 78.233y` 到这里已经 ~10^5，float32 把 sin 的输入量化了，
+## 相邻像素被系统性拉在一起）。
+##
+## 于是这条测试也留下一个教训，比它守的那条更重要：
+## **把 shader 抄到 CPU 上做统计，测不出 float32 的毛病**——GDScript 是 double。
+## 所以下面那个"对照组"不能再拿旧哈希（它在 double 下真的会通过），
+## 只能拿一个**故意做出来的条纹**：得先证明这把尺子量得出条纹，
+## 再用它去量颗粒。
+func _test_grain_is_white_noise() -> void:
+	print("[颗粒是白噪，不是布纹]")
+	var shader := load("res://shaders/desert_post.gdshader") as Shader
+	check(shader != null, "后处理 shader 能加载")
+	if shader == null:
+		return
+	var code := shader.code
+	check(
+		code.contains("p3 += dot(p3, p3.yzx + 33.33)"),
+		"颗粒用的是整数哈希（Hoskins 那一支）"
+	)
+	check(not code.contains("_rand("), "旧的 sin 哈希连名字一起清掉了")
+
+	var fresh := _grain_neighbour_correlation(true)
+	var stripe := _grain_neighbour_correlation(false)
+	print("  （相邻像素相关性：现在的颗粒 %.3f，故意做的条纹 %.3f）" % [fresh, stripe])
+	check(absf(fresh) < 0.2, "新哈希的相邻像素不相关（%.3f）——这才是颗粒" % fresh)
+	check(stripe > 0.6, "对照组：故意做的条纹被抓住（%.3f）——说明这条测试有牙" % stripe)
+
+
+## 一层 64×64 的颗粒里，相邻像素的相关性（lag-1）。取 x、y 两个方向里更差的那个。
+func _grain_neighbour_correlation(use_current_hash: bool) -> float:
+	var w := 64
+	var h := 64
+	var vals := PackedFloat32Array()
+	vals.resize(w * h)
+	for y in range(h):
+		for x in range(w):
+			vals[y * w + x] = _grain_value(float(x), float(y), use_current_hash)
+	return maxf(absf(_lag1_correlation(vals, w, h, 1, 0)), absf(_lag1_correlation(vals, w, h, 0, 1)))
+
+
+## 现在的颗粒哈希（从 shader 里照抄），以及一个**故意成纹**的对照信号。
+func _grain_value(x: float, y: float, use_current_hash: bool) -> float:
+	if not use_current_hash:
+		# 沿 x 方向缓慢起伏 → 一列一列地成纹。相关性应当接近 1。
+		return 0.5 + 0.5 * sin(x * 0.55 + y * 0.02)
+	var p := Vector3(x, y, x) * 0.1031
+	p = Vector3(fposmod(p.x, 1.0), fposmod(p.y, 1.0), fposmod(p.z, 1.0))
+	p += Vector3.ONE * p.dot(Vector3(p.y, p.z, p.x) + Vector3.ONE * 33.33)
+	return fposmod((p.x + p.y) * p.z, 1.0)
+
+
+func _lag1_correlation(vals: PackedFloat32Array, w: int, h: int, dx: int, dy: int) -> float:
+	var pairs := 0
+	var sa := 0.0
+	var sb := 0.0
+	var sa2 := 0.0
+	var sb2 := 0.0
+	var sab := 0.0
+	for y in range(h - dy):
+		for x in range(w - dx):
+			var a := vals[y * w + x]
+			var b := vals[(y + dy) * w + (x + dx)]
+			pairs += 1
+			sa += a
+			sb += b
+			sa2 += a * a
+			sb2 += b * b
+			sab += a * b
+	var n := float(pairs)
+	var cov := sab / n - (sa / n) * (sb / n)
+	var va := sa2 / n - (sa / n) * (sa / n)
+	var vb := sb2 / n - (sb / n) * (sb / n)
+	if va < 0.0000001 or vb < 0.0000001:
+		return 0.0
+	return cov / sqrt(va * vb)
+
+
+## 自言自语：一局里真的会说出来吗？说出来的是不是有来历的话？
+##
+## "好不好听"验不了，但下面四件事坏了都很难看，而且都能验：
+##   1. **每句都有出处**——编一句文言容易，编一句有来历的文言难；
+##   2. 拿真实的状态曲线走一局，话会自己说出来、不重复、不刷屏；
+##   3. 该来的那几句一定会来：起风有话说、幻影有话说、快死了有话说、倒下有话说；
+##   4. 落点那两句要**落在该落的那一秒上**：倒下之后 1~2.5 秒说出临终那一愿，
+##      闭眼之前念完最后一句（题记 12 秒才出来，不能撞车）。
+##
+## 判定在模型层（SoliloquyLines.due），这一节验的就是它——**不碰 HUD**，
+## 因为"什么时候该说话"和"怎么淡入淡出"是两件事，后者只在有窗口时才看得到。
+func _test_soliloquy() -> void:
+	print("[自言自语]")
+	# 1) 先记账：每条都有出处，而且不许长成一段字幕。
+	var quoted := 0
+	var too_long := 0
+	for line: Dictionary in SoliloquyLines.LINES:
+		var source := String(line["source"])
+		if source.is_empty():
+			print("  （没有出处的台词：%s）" % line["text"])
+		elif source.begins_with("《"):
+			quoted += 1
+		if String(line["text"]).length() > SoliloquyLines.MAX_CHARS:
+			too_long += 1
+	check(quoted >= 8, "至少八句直接取自史书（%d 句）" % quoted)
+	check(too_long == 0, "没有一句长到像字幕（上限 %d 字）" % SoliloquyLines.MAX_CHARS)
+
+	# 2) 拿**真实**的一局走一遍：沙暴按真相位推、体力按真模型掉，
+	#    每 0.25 秒问一次"现在该说哪句"。
+	var storm := Sandstorm.new()
+	var said := {}
+	var spoken: Array[String] = []
+	var spoken_at: Array[float] = []
+	var clock := 0.0
+	var last := -1.0e9
+	var step := 0.25
+	var collapse_clock := -1.0
+	GameState.reset()
+	while true:
+		if not GameState.is_collapsed:
+			if clock > 900.0:
+				break
+			storm.advance(step)
+			GameState.tick(step, 0.0)
+			clock += step
+		else:
+			if collapse_clock < 0.0:
+				collapse_clock = clock
+			if clock >= collapse_clock + 12.0:
+				break
+			GameState.tick(step, 0.0)
+			clock += step
+		var index := SoliloquyLines.due(_soliloquy_state(clock, last), said)
+		if index < 0:
+			continue
+		var line: Dictionary = SoliloquyLines.LINES[index]
+		said[line["id"]] = true
+		spoken.append(String(line["id"]))
+		spoken_at.append(clock)
+		last = clock
+
+	print("  （%d s 里说了 %d 句：%s）" % [clock, spoken.size(), ", ".join(spoken)])
+	check(spoken.size() >= 8, "一局里至少说出 8 句（实测 %d 句）" % spoken.size())
+	check(
+		spoken.size() == said.size(),
+		"每句只说一次（说了 %d 句 / 不同的 %d 句）" % [spoken.size(), said.size()]
+	)
+	var first_at := -1.0
+	if not spoken_at.is_empty():
+		first_at = spoken_at[0]
+	check(first_at >= 4.0, "开局那几秒不说话（第一句在第 %.1f s）" % first_at)
+
+	# 3) 不刷屏：两句之间至少隔 MIN_GAP，允许两条例外——
+	#    落下那两句的间隔是 0（它们必须落在该落的那一秒上）。
+	var tight := 0
+	for i in range(1, spoken_at.size()):
+		if spoken_at[i] - spoken_at[i - 1] < SoliloquyLines.MIN_GAP:
+			tight += 1
+	check(
+		tight <= 2,
+		"话不刷屏（只有 %d 处挨得比 %.0f s 近）" % [tight, SoliloquyLines.MIN_GAP]
+	)
+
+	# 4) 该来的都要来，而且落在该落的地方。
+	var down_at := _spoken_time(spoken, spoken_at, "down")
+	var relics_at := _spoken_time(spoken, spoken_at, "relics")
+	print(
+		"  （倒下在第 %.1f s；临终那句 +%.1f s，最后一句 +%.1f s）"
+		% [collapse_clock, down_at - collapse_clock, relics_at - collapse_clock]
+	)
+	check(spoken.has("heat_wind") or spoken.has("daze"), "起风时他有话说（风、熱风）")
+	check(spoken.has("mirage"), "幻影浮出来时他有话说（歌啸号哭）")
+	check(spoken.has("vow"), "快走不动时他有话说（宁可就西而死）")
+	check(
+		down_at >= collapse_clock + 0.9 and down_at < collapse_clock + 2.5,
+		"临终那一愿落在倒下之后 1~2.5 s（实测 +%.1f s）" % (down_at - collapse_clock)
+	)
+	check(
+		relics_at > collapse_clock + 6.0 and relics_at < collapse_clock + 8.5,
+		"最后一句在闭眼前后念完（实测 +%.1f s，题记 %.0f s 才出来）"
+		% [relics_at - collapse_clock, GameState.EPILOGUE_SECONDS]
+	)
+	storm.free()
+
+	# 5) 开场白必须真的**开场**。
+	#
+	#    这一条是录片时抓到的：`--storm` 那种一开局就满风的局里，"乏水草，多热风"
+	#    在第 0.03 秒就抢在"四远茫茫"前面说了出来——因为风那条的条件是"风够大"，
+	#    满风的局里它从第一帧就成立。台词表的顺序管得住同时到期的句子，
+	#    管不住**谁先到期**，所以另有一条开场下限（OPENING_FLOOR）。
+	var said2 := {}
+	var storm2 := Sandstorm.new()
+	storm2.set("_phase", 2)
+	storm2.force_intensity(0.95)
+	var clock2 := 0.0
+	var last2 := -1.0e9
+	var first2 := ""
+	GameState.reset()
+	while clock2 < 60.0 and first2.is_empty():
+		storm2.advance(step)
+		GameState.tick(step, 0.0)
+		clock2 += step
+		var index2 := SoliloquyLines.due(_soliloquy_state(clock2, last2), said2)
+		if index2 >= 0:
+			first2 = String(SoliloquyLines.LINES[index2]["id"])
+			said2[first2] = true
+			last2 = clock2
+	print("  （一开局就满风：第一句在第 %.1f s 说出来，是 %s）" % [clock2, first2])
+	check(first2 == "far_off", "一开局就满风，第一句仍然是开场白（%s）" % first2)
+	check(
+		clock2 >= 4.0 and clock2 <= SoliloquyLines.OPENING_FLOOR,
+		"开场白在 %.1f s 说出来（4 s 之后、%d s 之前）"
+		% [clock2, int(SoliloquyLines.OPENING_FLOOR)]
+	)
+	storm2.free()
+	GameState.reset()
+
+
+## 摆一份自言自语要的状态出来。**和 hud.gd 里那份逐字对应**：
+## 两处的键名一旦分家，模型层会读到默认值、然后静默地什么都不说。
+func _soliloquy_state(clock: float, last: float) -> Dictionary:
+	return {
+		"clock": clock,
+		"elapsed": GameState.elapsed,
+		"stamina": GameState.stamina,
+		"storm_intensity": GameState.storm_intensity,
+		"wind_force": GameState.wind_force,
+		"mirage_presence": GameState.mirage_presence(),
+		"collapsed": GameState.is_collapsed,
+		"collapse_elapsed": GameState.collapse_elapsed,
+		"last_spoken_at": last,
+	}
+
+
+func _spoken_time(spoken: Array[String], at: Array[float], id: String) -> float:
+	var index := spoken.find(id)
+	if index < 0:
+		return -1.0e9
+	return at[index]
+
+
 func _test_ground_following() -> void:
 	print("[贴地]")
 	var root := Node3D.new()
@@ -578,6 +1355,77 @@ func _test_breath() -> void:
 	breath.stop()
 	breath.free()
 	check(not is_instance_valid(breath), "喘气节点已析构")
+
+
+## 风声。和 [喘气] 同一路：headless 里没有声卡，但波形可以量。
+##
+## 这一条要守的**不是"有没有声音"，而是"风大了是不是真的更像风"**：
+## 只把同一个噪声调响，听上去是"音量变了"；风压上来的时候，
+## **频谱是往上抬的**——低频的滚动里冒出沙粒打在空气里的高频。
+## 所以量两样：能量（更响）和过零率（更亮）。
+func _test_wind_sound() -> void:
+	print("[风声]")
+	var wind := Wind.new()
+	add_child(wind)
+	await get_tree().process_frame
+	check(wind.stream != null, "风声挂上了流")
+	check(wind.playing, "进关就开始吹")
+	GameState.reset()
+
+	GameState.wind_force = 0.0
+	var calm := _sample_stats(wind, 12000)
+	GameState.wind_force = 0.35
+	var breeze := _sample_stats(wind, 12000)
+	GameState.wind_force = 1.0
+	var gale := _sample_stats(wind, 12000)
+	print(
+		"  （噪声 RMS：无风 %.4f / 半风 %.4f / 满风 %.4f；过零率 %.3f / %.3f / %.3f）"
+		% [
+			calm["rms"], breeze["rms"], gale["rms"],
+			calm["zcr"], breeze["zcr"], gale["zcr"],
+		]
+	)
+	check(float(calm["peak"]) <= 1.0 and float(gale["peak"]) <= 1.0, "不削顶（峰值 %.2f）" % gale["peak"])
+	check(float(calm["rms"]) < 0.02, "无风时几乎静音（RMS %.4f）——不能有一条常驻的'白噪底'" % calm["rms"])
+	check(float(breeze["rms"]) > float(calm["rms"]) * 3.0, "起风就听得出来（RMS %.4f）" % breeze["rms"])
+	check(
+		float(gale["rms"]) > float(breeze["rms"]) * 1.8,
+		"压顶时更响（RMS %.4f → %.4f）" % [breeze["rms"], gale["rms"]]
+	)
+	check(
+		float(gale["zcr"]) > float(calm["zcr"]) * 1.3,
+		"风越大越亮（过零率 %.3f → %.3f）——不是把同一个声音调大" % [calm["zcr"], gale["zcr"]]
+	)
+
+	# 合眼之后一路退到静音：和喘气同一条规矩，也和眼睑同一条时间线。
+	GameState.is_collapsed = true
+	GameState.collapse_elapsed = 9.0
+	check(wind.fade_level() < 0.2, "眼睑合上时风声退下去（%.2f）" % wind.fade_level())
+	GameState.collapse_elapsed = 20.0
+	check(wind.fade_level() < 0.001, "彻底黑掉之后是静音（%.4f）" % wind.fade_level())
+	GameState.reset()
+	wind.stop()
+	wind.free()
+
+
+## 量一段噪声：峰值、RMS、过零率（过零率是"亮不亮"的粗读数）。
+func _sample_stats(wind: Wind, n: int) -> Dictionary:
+	var peak := 0.0
+	var energy := 0.0
+	var crossings := 0
+	var previous := 0.0
+	for i in range(n):
+		var v := wind.next_sample(1.0 / Wind.MIX_RATE)
+		peak = maxf(peak, absf(v))
+		energy += v * v
+		if i > 0 and ((v >= 0.0) != (previous >= 0.0)):
+			crossings += 1
+		previous = v
+	return {
+		"peak": peak,
+		"rms": sqrt(energy / float(n)),
+		"zcr": float(crossings) / float(n),
+	}
 
 
 ## HUD：**不许有水囊，也不许有里程**。
@@ -1259,6 +2107,7 @@ func _test_main_scene_assembles() -> void:
 	check(instance.get("hud") != null, "HUD 已建")
 	check(instance.get("bgm") != null, "BGM 已建")
 	check(instance.get("breath") != null, "喘气层已建")
+	check(instance.get("wind") != null, "风声层已建")
 	var world: Node = instance.get("world")
 	check(world != null and world.get("dune") != null, "高度场已就绪")
 	# 临终那只手挂在相机上。它平时是隐藏的，但**必须已经建好**——

@@ -20,6 +20,7 @@ const FADE_SECONDS := 12.0
 ## 而 100~400 m 那几道脊线还看得见。
 const CALM_FOG := 0.0014
 const PEAK_FOG := 0.042
+## 沙暴峰值时推在玩家身上的力（米/秒）。**方向比大小重要**，见 wind_direction。
 const PEAK_PUSH := 2.6
 
 var world: DesertWorld
@@ -27,11 +28,22 @@ var player: Wanderer
 
 ## 0..1，当前沙暴强度。测试与 HUD 都读它。
 var intensity := 0.0
-## 风向（水平面上的单位向量）。走得越久，被吹偏得越远。
-var wind_direction := Vector3(1.0, 0.0, 0.35).normalized()
+## 风向（水平面上的单位向量）：**几乎横着抽过来**，只带一点点逆风。
+##
+## 上一版是 (1, 0.35)——和"走向弥勒"（+X）只差 19°。于是那股 2.6 m/s 的推力
+## 的绝大部分变成了**顺风加速**：玩家只觉得自己走得快了一点，完全读不出"被风
+## 吹"（需求方 2026-09-24："大风吹的感觉不是很明显，视觉和行走上"）。
+##
+## 现在横向分量占 97%：人得侧着身子顶，才读得出风；沙也横着流过画面，
+## 一眼就看得见风往哪边刮。剩下那 3% 的逆风（-X）是"顶着风走脚下会慢"，
+## 只给一点点——给多了，三分钟就翻不够四道沙丘了（[风里的一局] 测试守着）。
+var wind_direction := Vector3(-0.22, 0.0, 0.98).normalized()
 
 var _phase := 0
 var _timer := 0.0
+## 单调时钟。**不能用 _timer**：它每一相位都归零，阵风的相位会跟着跳，
+## "一阵一阵"立刻变成"每过一关抖一下"。
+var _clock := 0.0
 
 
 func _physics_process(delta: float) -> void:
@@ -43,8 +55,30 @@ func _physics_process(delta: float) -> void:
 ## 抽成一个公开方法，是为了让测试能**按真实相位走**（而不是自己凑一个
 ## 强度曲线）：[体力契约] 和 [地形够不够大] 两条都要拿真实的沙暴算账。
 func advance(delta: float) -> void:
+	_clock += delta
 	_advance_phase(delta)
 	_apply()
+
+
+## 阵风包络 0.55..1.0。风不是一条稳定的曲线，"大风吹"读起来是**一阵一阵**：
+## 一波扑上来、缓一缓、又一波。两个不可通约的慢频率相乘得到包络，再取幂把
+## 波峰削尖——正弦的推背感是规律的，规律的东西不像风。
+##
+## **三处共用这一个包络**：玩家的推力、镜头的晃动、后处理里沙的浓淡。
+## 各写一份的话，"沙正好扑上来的那一刻人也被推了一下"这种同步立刻散掉，
+## 而这三样同步起来才是"一场风"而不是"三个效果"。
+func gust(time: float) -> float:
+	var a := 0.5 + 0.5 * sin(time * 0.63)
+	var b := 0.5 + 0.5 * sin(time * 0.29 + 1.7)
+	return 0.55 + 0.45 * pow(clampf(a * b * 2.0, 0.0, 1.0), 1.6)
+
+
+## 这一帧的风力 0..1：强度 × 阵风。0 = 完全没风。
+##
+## 它是**唯一出口**：推力、镜头、沙子都读它。别再各自去乘 intensity——
+## 那样阵风就只作用在其中一样上。
+func wind_force() -> float:
+	return intensity * gust(_clock)
 
 
 func _advance_phase(delta: float) -> void:
@@ -79,11 +113,16 @@ signal phase_changed(phase: int)
 
 
 func _apply() -> void:
+	var force := wind_force()
 	if world != null:
 		world.set_fog_density(lerpf(CALM_FOG, PEAK_FOG, intensity))
 		world.set_storm_look(intensity)
 	if player != null:
-		player.external_push = wind_direction * (PEAK_PUSH * intensity)
+		player.external_push = wind_direction * (PEAK_PUSH * force)
+	# 风力和风向各写一处，镜头（Wanderer 自己读）和后处理（main 转发）
+	# 都从这里取。风的强弱和沙的浓淡因此永远是同一个数。
+	GameState.wind_force = force
+	GameState.wind_direction = wind_direction
 	GameState.storm_intensity = intensity
 
 
@@ -101,6 +140,7 @@ func force_intensity(value: float) -> void:
 func reset() -> void:
 	_phase = 0
 	_timer = 0.0
+	_clock = 0.0
 	intensity = 0.0
 	_apply()
 

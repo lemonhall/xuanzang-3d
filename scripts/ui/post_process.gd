@@ -10,15 +10,17 @@ extends CanvasLayer
 ## 而不是"这个像素属于哪个物体"：沙是空气，不属于任何网格。
 
 ## 常驻的沙尘浓度。**不能是 0**：要的是"整个场景一直飘着"，
-## 沙暴只是把它推浓。0.42 是"看得见、又不挡路"的位置。
-const DUST_CALM := 0.42
+## 沙暴只是把它推浓。0.50 是"看得见、又不挡路"的位置——
+## 早先写 0.42 时那一层其实**几乎看不见**（门槛落在 +1σ 以外，见 shader 里的注释），
+## 改成按 σ 定门槛之后，同样的数才真的在画面上有东西；0.50 是照新的门槛配的。
+const DUST_CALM := 0.50
 const DUST_STORM := 1.0
 
 var _rect: ColorRect
 var _material: ShaderMaterial
 
-## 风向（水平面的单位向量）。三个系统的沙必须往同一边走。
-var wind_direction := Vector2(1.0, 0.35)
+## 风向（世界坐标的水平单位向量）。三个系统的沙必须往同一边走。
+var wind_direction := Vector3(1.0, 0.0, 0.35).normalized()
 
 
 func _ready() -> void:
@@ -42,6 +44,18 @@ func set_storm(intensity: float) -> void:
 	_material.set_shader_parameter("grain_amount", lerpf(0.035, 0.09, t))
 	_material.set_shader_parameter("contrast", lerpf(1.14, 0.92, t))
 	_material.set_shader_parameter("dust_amount", lerpf(DUST_CALM, DUST_STORM, t))
+	# 沙的"含沙量"和"有没有在跑"是两件事：amount 跟着**沙暴**（长曲线），
+	# wind_force 跟着**阵风**（几秒一个来回，见 set_wind_force）。
+	_material.set_shader_parameter("dust_gain", lerpf(0.85, 1.15, t))
+
+
+## 风力 0..1（沙暴强度 × 阵风）。沙的浓淡和飞行的快慢都挂在它上面——
+## 和推着人走、歪镜头的那个数是**同一个**，所以"沙扑上来"和"人被推了"
+## 永远同时发生。
+func set_wind_force(force: float) -> void:
+	if _material == null:
+		return
+	_material.set_shader_parameter("dust_wind_force", clampf(force, 0.0, 1.0))
 
 
 ## 把相机交给后处理。
@@ -60,6 +74,8 @@ func set_view(camera: Camera3D) -> void:
 	_material.set_shader_parameter("cam_right", basis.x)
 	_material.set_shader_parameter("cam_up", basis.y)
 	_material.set_shader_parameter("cam_forward", -basis.z)
+	# 基向量是给沙用的：一、把视线还原成世界方向（沙要长在方位角里，不贴在屏幕上）；
+	# 二、把**世界风向**投到画面的横轴上——风横着刮时沙横着淌，风反过来沙就反着淌。
 	var size := get_viewport().get_visible_rect().size
 	var tan_v := tan(deg_to_rad(camera.fov * 0.5))
 	_material.set_shader_parameter("tan_half_fov", Vector2(tan_v * size.x / maxf(size.y, 1.0), tan_v))
@@ -75,12 +91,12 @@ func set_sun(direction: Vector3) -> void:
 
 ## 风向。沙往哪边淌由它定，别在 shader 里写死一个正号。
 func set_wind(direction: Vector3) -> void:
-	var flat := Vector2(direction.x, direction.z)
+	var flat := Vector3(direction.x, 0.0, direction.z)
 	if flat.length_squared() < 0.000001:
 		return
 	wind_direction = flat.normalized()
 	if _material != null:
-		_material.set_shader_parameter("wind_direction", wind_direction)
+		_material.set_shader_parameter("wind_world", wind_direction)
 
 
 ## 眼睑合拢 0..1（0 = 睁着）。倒下之后由 `GameState.eye_close_at()` 驱动。

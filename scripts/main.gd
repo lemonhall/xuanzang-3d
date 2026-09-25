@@ -17,6 +17,7 @@ var post: PostProcess
 var mirage: Mirage
 var bgm: Bgm
 var breath: Breath
+var wind: Wind
 
 ## 幻影的**正面城墙**保持在玩家前方 MIRAGE_FRONT_WALL 米处——**它走不近**。
 ##
@@ -135,6 +136,38 @@ func _ready() -> void:
 	breath = Breath.new()
 	breath.name = "Breath"
 	add_child(breath)
+	# 风声挨着喘气放：两样都是"一直在响"的噪声层，都不参与关卡逻辑，
+	# 都读 GameState——喘气读累，风读风力。**风不是音乐的一部分**：
+	# 音乐那边仍然是"载入、循环、一直播"三件事，一个字都不掺（见 bgm.gd）。
+	wind = Wind.new()
+	wind.name = "Wind"
+	add_child(wind)
+
+	_announce_first_frame()
+
+
+## 告诉加载页："第一帧已经画出来了。"
+##
+## Web 上的进度条只走到 90%（见 web/shell.html）：引擎报的那个数只是
+## **下载进度**，它到 100% 的时候地形还没生成、着色器还没编译，玩家看着
+## 一条满格的进度条继续黑屏干等——而进度条本来就是拿来安人心的，
+## 骗一次就白做了。所以最后那 10% 由这里说了算：**这一帧真的画出来了**。
+##
+## 桌面上没有 JavaScriptBridge 这个单例，整段是死代码。
+func _announce_first_frame() -> void:
+	var on_web := OS.has_feature("web")
+	var has_bridge := Engine.has_singleton("JavaScriptBridge")
+	if not on_web or not has_bridge:
+		return
+	await RenderingServer.frame_post_draw
+	var bridge: Object = Engine.get_singleton("JavaScriptBridge")
+	var result: Variant = bridge.call(
+		"eval", "window.__godotFrameReady ? (window.__godotFrameReady(), 'ok') : 'no-hook'", true
+	)
+	# 只有**没接上**才吭声：进度条会卡在 90% 不动，那是加载页和引擎脱钩了，
+	# 得在控制台留一条能查的线索。正常路径不需要打印。
+	if result is String and String(result) != "ok":
+		push_warning("加载页的收尾钩子没接上：%s" % result)
 
 
 func _process(delta: float) -> void:
@@ -148,10 +181,17 @@ func _process(delta: float) -> void:
 	player.focus_point = mirage.statue_focus_point()
 	if post != null and storm != null:
 		post.set_storm(storm.intensity)
+		# 风力和风向走 GameState：**和推着人走、歪镜头的是同一个数**
+		# （Sandstorm 每帧写的）。沙扑上来的那一刻，人也正好被推了一下。
+		post.set_wind_force(GameState.wind_force)
 		# 沙尘要长在空气里，不在镜头上：后处理每帧都要知道相机朝哪、太阳在哪、
 		# 风往哪吹。三个都从别处已有的来源取，不在这里另算一份。
 		post.set_view(player.camera())
-		post.set_wind(storm.wind_direction)
+		post.set_wind(GameState.wind_direction)
+		# 脚下的沙纹也吃这阵风：**脊线垂直于风、纹的深浅跟着阵风**。
+		# 和上面那三处（推力、镜头、沙带）是同一个数，所以风扑上来的那一刻，
+		# 脚底下的纹路也一起变深——不是四套效果，是一场风。
+		world.set_wind(GameState.wind_direction, GameState.wind_force)
 	if post != null and world != null:
 		post.set_sun(world.sun_direction())
 	if post != null:
@@ -191,6 +231,9 @@ func restart() -> void:
 	_mirage_height = world.height_at(player.global_position.x, player.global_position.z) + 10.0
 	if post != null:
 		post.set_eye_close(0.0)
+	# 说过的那些话要能再说一遍：自言自语是这一局的伴，不是一次性的开关。
+	if hud != null:
+		hud.reset_soliloquy()
 
 
 ## 把幻影重新摆到玩家前方固定距离处。
@@ -205,15 +248,6 @@ func _update_mirage(delta: float) -> void:
 	_mirage_height = lerpf(_mirage_height, ground, 1.0 - exp(-1.2 * delta))
 	mirage.global_position = Vector3(offset.x, _mirage_height, offset.z)
 	mirage.set_camera_position(player.eye_position())
-	mirage.set_presence(_mirage_presence())
-
-
-## 幻影的浓度由"渴"和沙暴共同决定。
-##
-## 不是按时间表演出：累是真实存在的（体力在掉），沙暴是真实存在的，
-## 玩家能隐约意识到"我越难受，它越清楚"——这比单纯定时出现可怕得多。
-## 保底 0.28 是让第一次抬头就能看见，否则玩家根本不知道有这东西。
-func _mirage_presence() -> float:
-	return clampf(
-		0.28 + GameState.fatigue() * 0.7 + GameState.storm_intensity * 0.6, 0.0, 1.0
-	)
+	# 浓度公式在模型层（GameState.mirage_presence）：HUD 的自言自语和这里的
+	# 材质用的是同一个数，不可能分家。
+	mirage.set_presence(GameState.mirage_presence())

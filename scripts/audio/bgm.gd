@@ -19,6 +19,24 @@ const TRACK_PATH := "res://assets/audio/bgm/bishangguan-deathnov-remix.mp3"
 ## 后处理的高光，所以基准压 6 dB。
 const VOLUME_DB := -6.0
 
+## Web 上把这首歌交给**浏览器自己的音频线程**播（sample 播放）。
+##
+## 桌面端不走这条路，也不该走：桌面有独立音频线程，混音不吃渲染的时间，
+## Stream 播放原生循环、内存也小。**Web 不是这样**——4.7 的 web 音频驱动
+## 除非开 Thread Support，混音就落在**主线程**上（`platform/web/audio_driver_web.cpp`
+## 里 `_process_callback` 直接调 `audio_server_process`，一个 render quantum
+## （128 帧）一次，靠 AudioWorklet 的 postMessage 往返喂数据）。走动时主线程一忙，
+## 先喂不上，worklet 就丢掉那个 quantum：音乐当场表现为**被拖慢、发飘——
+## 像磁带被人按住**。这不是"缓冲调大点"能根治的，是把音乐放在了竞争激烈的
+## 那条线程上。
+##
+## sample 播放走的是浏览器原生的 AudioBufferSourceNode：解码在**加载时一次做完**
+## （74 s 立体声 ≈ 26 MB 的 AudioBuffer），播放期间主线程一次都不插手，
+## 结构上就不可能被渲染拖慢。代价是循环交给 JS 在 `ended` 事件里重启，
+## 接缝比原生循环略明显——这首歌头尾本来就有静音和淡出，接得住（见
+## docs/design/bgm.md）。
+const WEB_SAMPLE_PLAYBACK := true
+
 
 func _ready() -> void:
 	var track := load(TRACK_PATH) as AudioStreamMP3
@@ -27,6 +45,9 @@ func _ready() -> void:
 		return
 	stream = track
 	volume_db = VOLUME_DB
+	if OS.has_feature("web") and WEB_SAMPLE_PLAYBACK:
+		# 必须在 play() 之前：播放类型决定 play() 走哪条实例化路径。
+		playback_type = AudioServer.PLAYBACK_TYPE_SAMPLE
 	play()
 
 

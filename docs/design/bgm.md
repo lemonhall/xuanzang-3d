@@ -91,6 +91,12 @@ ffmpeg -hide_banner -sseof -0.4 -i <mp3> -af volumedetect -f null -         # �
 于是删干净了，只剩载入 / 循环 / 播放三件事。**记在这里，别再加回来。**
 氛围的底子应该稳；要调大小就改 `VOLUME_DB` 那一个常量。
 
+**风声不算"加回来"**（2026-09-24）：`scripts/audio/wind.gd` 是**另一条独立的层**，
+它读 `GameState.wind_force`、跟着风起风落，但那是它自己的录音机，不是这首曲子的
+状态机——音乐这一条仍然是"载入 / 循环 / 播放"。分界线是：**曲子不许因为
+世界上发生了什么而变形**；一个会随世界变化的音效，应该另起一个播放器。
+风声的基准压到 `BASE_DB = -12 dB`（在音乐的 -6 dB 之下），闭眼时和喘气一起退场。
+
 ## 5. 别把 headless 的收尾告警当成失败
 
 `godot --headless tests/test_scene.tscn` 退出时会打印：
@@ -108,3 +114,37 @@ ERROR: 1 resources still in use at exit
 （顺带记一条真会咬人的：`AudioStreamPlayer` 节点如果被 `queue_free()` 但又没等到
 帧末真正析构，混音器上会留着活的播放实例。所以测试里拆场景用 `free()`
 而不是 `queue_free()`。）
+
+## 6. Web 上这首歌交给**浏览器**播，不进 Godot 的混音器
+
+这是 2026-09-24 修"音乐被拖慢"那一格时的取舍，**别改成 Stream**。
+
+桌面上混音器有自己的线程，Stream 播放原生循环、内存也小，所以桌面维持原样。
+Web 不是：4.7 的 `platform/web/audio_driver_web.cpp` 在不开 Thread Support 时，
+混音就在**主线程**上跑（`_process_callback` → `audio_server_process`，每 128 帧
+一个 render quantum，靠 AudioWorklet 的 postMessage 往返供数据）。渲染一忙，
+先喂不上，worklet 就丢掉那个 quantum。丢一个 quantum 是 2.7 ms 的静音，
+丢得密了听感就是**被拖慢**——像磁带被人按住。这不是缓冲大小问题，是
+"把音乐放在了和渲染抢同一条线程上"。
+
+`Bgm` 因此在 Web 上显式设 `playback_type = AudioServer.PLAYBACK_TYPE_SAMPLE`：
+引擎会把整条流**预先混一遍**成 PCM（`register_sample` → `godot_audio_sample_register_stream`），
+交给浏览器原生的 `AudioBufferSourceNode` 播放。
+
+* 解码/预混只在**加载时一次**（74 s 立体声 ≈ 26 MB 的 AudioBuffer）——
+  正好落在加载页那几秒里，播放期间主线程一次都不插手；
+* 于是"音乐被渲染拖慢"结构上不可能发生；
+* 代价：**循环由 JS 在 `ended` 事件里重启**（不是原生 loop），接缝比桌面明显一点。
+  这首歌头尾本来就有 0.4 s 静音和一条 -24.7 → -43.9 dB 的淡出，接得住——
+  第 3 节量的那两个数，在这里又多赚了一次。
+
+喘气和风声不能这么做：它们是 `AudioStreamGenerator` 现场合成，sample 播放
+要求整条流能预先解成 AudioBuffer，生成器给不出来，引擎会直接丢掉这条流
+（只留一句 "trying to play a sample from a stream that cannot be sampled"）。
+所以那两个显式设成 `PLAYBACK_TYPE_STREAM`，留在混音器上，靠
+`audio/driver/output_latency.web=100`（默认 50，缓冲 2048 → 4096 帧 ≈ 42.7 → 85.3 ms）
+撑余量。
+
+实测（有头 Chrome，24 秒连续行走，输出波形用 `AnalyserNode` 抓）：
+改之前 24 秒里最长纯静音段 384 样本（丢了一个 quantum），改之后 **0**；
+`createBufferSource` 从 0 变 1；BGM 播放速率两版都是 1.0000×。
